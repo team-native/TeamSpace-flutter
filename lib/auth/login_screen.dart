@@ -1,9 +1,17 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
-import '../../app/router.dart';
+import '../app/router.dart';
+import 'login_expired_dialog.dart'; // 💡 만료 팝업 모듈 임포트
+import '../core/network/api_exception.dart';
+import '../data/repositories/auth_repository.dart';
 
 class LoginScreen extends StatefulWidget {
-  const LoginScreen({super.key});
+  final bool isExpired; // 💡 로그인 만료로 인한 진입 여부
+
+  const LoginScreen({
+    super.key,
+    this.isExpired = true,
+  });
 
   @override
   State<LoginScreen> createState() => _LoginScreenState();
@@ -18,18 +26,51 @@ class _LoginScreenState extends State<LoginScreen> {
   bool _isLoading = false;
 
   @override
+  void initState() {
+    super.initState();
+    // 💡 로그인 만료 진입 시 렌더링 후 만료 팝업 자동 노출
+    if (widget.isExpired) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        showLoginExpiredDialog(context);
+      });
+    }
+  }
+
+  @override
   void dispose() {
     _emailController.dispose();
     _passwordController.dispose();
     super.dispose();
   }
 
-  void _handleLogin() async {
+  Future<void> _handleLogin() async {
+    final email = _emailController.text.trim();
+    final password = _passwordController.text;
+
+    if (email.isEmpty || password.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('이메일과 비밀번호를 입력해 주세요.')),
+      );
+      return;
+    }
+
     setState(() => _isLoading = true);
-    await Future.delayed(const Duration(milliseconds: 600));
-    if (mounted) {
-      setState(() => _isLoading = false);
+
+    try {
+      await AuthRepository.instance.login(
+        email: email,
+        password: password,
+        keepLoggedIn: _keepLoggedIn,
+      );
+      if (!mounted) return;
       context.go(AppRoutes.home);
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(e.message)),
+      );
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
     }
   }
 
@@ -399,7 +440,7 @@ class _LoginScreenState extends State<LoginScreen> {
 
               const SizedBox(height: 20),
 
-              // 7. 하단 인하우스 계정 요청 링크
+              // 7. 계정 요청 링크
               Center(
                 child: GestureDetector(
                   onTap: () {
