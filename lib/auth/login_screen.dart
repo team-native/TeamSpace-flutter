@@ -74,6 +74,24 @@ class _LoginScreenState extends State<LoginScreen> {
     }
   }
 
+  /// POST /auth/password-reset-requests
+  /// 서버는 가입 여부와 상관없이 accepted를 돌려줘서, 안내 문구도 "가입된 이메일이라면"으로 써요
+  Future<void> _sendPasswordReset(String email) async {
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      await AuthRepository.instance.requestPasswordReset(email);
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text('가입된 이메일이라면 $email (으)로 재설정 링크를 보내드렸어요.'),
+        ),
+      );
+    } on ApiException catch (e) {
+      messenger.showSnackBar(
+        SnackBar(content: Text(e.message)),
+      );
+    }
+  }
+
   void _showFindPasswordDialog(BuildContext context) {
     final TextEditingController resetEmailController = TextEditingController();
 
@@ -178,17 +196,16 @@ class _LoginScreenState extends State<LoginScreen> {
                         child: InkWell(
                           onTap: () {
                             final email = resetEmailController.text.trim();
-                            Navigator.pop(dialogContext);
-
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              SnackBar(
-                                content: Text(
-                                  email.isEmpty
-                                      ? '비밀번호 재설정 링크를 발송했습니다.'
-                                      : '$email (으)로 재설정 링크를 보내드렸습니다.',
+                            if (email.isEmpty) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(
+                                  content: Text('가입한 이메일을 입력해 주세요.'),
                                 ),
-                              ),
-                            );
+                              );
+                              return;
+                            }
+                            Navigator.pop(dialogContext);
+                            _sendPasswordReset(email);
                           },
                           child: const Center(
                             child: Text(
