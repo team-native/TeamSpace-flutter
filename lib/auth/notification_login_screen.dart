@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import '../app/router.dart';
+import 'package:teamspace/core/network/api_exception.dart';
+import 'package:teamspace/data/repositories/auth_repository.dart';
 
 class NotificationLoginScreen extends StatefulWidget {
   const NotificationLoginScreen({super.key});
@@ -14,11 +16,84 @@ class _NotificationLoginScreenState extends State<NotificationLoginScreen> {
   final TextEditingController _emailController = TextEditingController();
   final TextEditingController _passwordController = TextEditingController();
 
+  bool _isLoading = false;
+  bool _isSendingReset = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _fillLastEmail();
+  }
+
   @override
   void dispose() {
     _emailController.dispose();
     _passwordController.dispose();
     super.dispose();
+  }
+
+  /// 마지막으로 로그인한 이메일을 미리 채워요
+  Future<void> _fillLastEmail() async {
+    final email = await AuthRepository.instance.readLastEmail();
+    if (!mounted || email == null || email.isEmpty) return;
+    if (_emailController.text.isEmpty) {
+      _emailController.text = email;
+    }
+  }
+
+  void _showMessage(String message) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(message)),
+    );
+  }
+
+  /// POST /auth/login → 성공하면 받은 결재 상세로 이동
+  Future<void> _handleLogin() async {
+    final email = _emailController.text.trim();
+    final password = _passwordController.text;
+
+    if (email.isEmpty || password.isEmpty) {
+      _showMessage('이메일과 비밀번호를 입력해 주세요.');
+      return;
+    }
+
+    FocusScope.of(context).unfocus();
+    setState(() => _isLoading = true);
+
+    try {
+      await AuthRepository.instance.login(
+        email: email,
+        password: password,
+      );
+      if (!mounted) return;
+      context.pushReplacement(AppRoutes.approvalReviewDetail); // 05-4 이동
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      _showMessage(e.message);
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
+    }
+  }
+
+  /// POST /auth/password-reset-requests
+  Future<void> _handleFindPassword() async {
+    final email = _emailController.text.trim();
+    if (email.isEmpty) {
+      _showMessage('재설정 링크를 받을 이메일을 먼저 입력해 주세요.');
+      return;
+    }
+
+    setState(() => _isSendingReset = true);
+    try {
+      await AuthRepository.instance.requestPasswordReset(email);
+      if (!mounted) return;
+      _showMessage('가입된 이메일이라면 $email (으)로 재설정 링크를 보내드렸어요.');
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      _showMessage(e.message);
+    } finally {
+      if (mounted) setState(() => _isSendingReset = false);
+    }
   }
 
   @override
@@ -166,9 +241,9 @@ class _NotificationLoginScreenState extends State<NotificationLoginScreen> {
                 color: const Color(0xFFEFF6FF),
                 borderRadius: BorderRadius.circular(20),
               ),
-              child: Column(
+              child: const Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
-                children: const [
+                children: [
                   Text(
                     '돌아갈 위치',
                     style: TextStyle(
@@ -248,6 +323,7 @@ class _NotificationLoginScreenState extends State<NotificationLoginScreen> {
               child: TextField(
                 controller: _passwordController,
                 obscureText: true,
+                onSubmitted: (_) => _isLoading ? null : _handleLogin(),
                 decoration: const InputDecoration(
                   hintText: '비밀번호',
                   hintStyle: TextStyle(
@@ -262,22 +338,30 @@ class _NotificationLoginScreenState extends State<NotificationLoginScreen> {
             ),
             const SizedBox(height: 24),
 
-            // 💡 8. 로그인하고 요청 확인 버튼 (클릭 시 05-4 받은 결재 상세로 이동)
+            // 💡 8. 로그인하고 요청 확인 버튼 (로그인 성공 시 05-4 받은 결재 상세로 이동)
             SizedBox(
               width: double.infinity,
               height: 52,
               child: ElevatedButton(
-                onPressed: () {
-                  context.pushReplacement(AppRoutes.approvalReviewDetail); // 05-4 이동
-                },
+                onPressed: _isLoading ? null : _handleLogin,
                 style: ElevatedButton.styleFrom(
                   backgroundColor: primaryBlue,
+                  disabledBackgroundColor: primaryBlue.withOpacity(0.6),
                   elevation: 0,
                   shape: RoundedRectangleBorder(
                     borderRadius: BorderRadius.circular(16),
                   ),
                 ),
-                child: const Text(
+                child: _isLoading
+                    ? const SizedBox(
+                  width: 22,
+                  height: 22,
+                  child: CircularProgressIndicator(
+                    color: Colors.white,
+                    strokeWidth: 2.5,
+                  ),
+                )
+                    : const Text(
                   '로그인하고 요청 확인',
                   style: TextStyle(
                     fontSize: 15,
@@ -294,15 +378,25 @@ class _NotificationLoginScreenState extends State<NotificationLoginScreen> {
               width: double.infinity,
               height: 52,
               child: ElevatedButton(
-                onPressed: () {},
+                onPressed: _isSendingReset ? null : _handleFindPassword,
                 style: ElevatedButton.styleFrom(
                   backgroundColor: const Color(0xFFFFFBEB),
+                  disabledBackgroundColor: const Color(0xFFFFFBEB),
                   elevation: 0,
                   shape: RoundedRectangleBorder(
                     borderRadius: BorderRadius.circular(16),
                   ),
                 ),
-                child: const Text(
+                child: _isSendingReset
+                    ? const SizedBox(
+                  width: 20,
+                  height: 20,
+                  child: CircularProgressIndicator(
+                    color: Color(0xFF78350F),
+                    strokeWidth: 2.5,
+                  ),
+                )
+                    : const Text(
                   '비밀번호 찾기',
                   style: TextStyle(
                     fontSize: 15,

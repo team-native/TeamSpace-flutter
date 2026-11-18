@@ -1,6 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
+import 'package:intl/intl.dart';
+import 'package:teamspace/core/network/api_exception.dart';
+import 'package:teamspace/data/repositories/community_repository.dart';
 
+/// 전체 공지 작성
+/// - POST /admin/notices (Admin · FA · Leader만 호출 가능해요)
 class TeamNoticeCreateScreen extends StatefulWidget {
   const TeamNoticeCreateScreen({super.key});
 
@@ -9,35 +14,87 @@ class TeamNoticeCreateScreen extends StatefulWidget {
 }
 
 class _TeamNoticeCreateScreenState extends State<TeamNoticeCreateScreen> {
-  String _selectedTarget = 'Native'; // Native / Inspace
-  bool _isImportant = true;
-  bool _isPinned = true;
+  static final DateFormat _ymdHmFmt = DateFormat('yyyy.MM.dd HH:mm');
 
-  late TextEditingController _titleController;
-  late TextEditingController _bodyController;
+  String _selectedTarget = 'Native'; // Native / Inspace (서버에는 반영되지 않는 표시용 값)
+  bool _isImportant = false;
+  bool _isPinned = false;
 
-  String _publishOption = 'scheduled'; // now: 지금 게시, scheduled: 예약 게시
-  final String _scheduledTime = '2026.10.17 09:00';
+  final TextEditingController _titleController = TextEditingController();
+  final TextEditingController _bodyController = TextEditingController();
 
-  @override
-  void initState() {
-    super.initState();
-    _titleController = TextEditingController(text: '10월 정기 회의 장소 안내');
-    _bodyController = TextEditingController(
-      text: '이번 달 Native 정기 회의는 4층 홈베이스에서 진행해요.\n\n'
-          '• 일시: 2026.10.24 14:00–16:00\n'
-          '• 대상: Native 전체 구성원\n'
-          '• 장소: 4층 홈베이스\n\n'
-          '프로젝트별 진행 상황과 11월 활동 계획을 나눌 예정이에요.\n'
-          '참석 여부는 Native 일정에서 응답해 주세요.',
-    );
-  }
+  String _publishOption = 'now'; // now: 지금 게시, scheduled: 예약 게시
+  DateTime? _scheduledTime;
+  bool _isSubmitting = false;
 
   @override
   void dispose() {
     _titleController.dispose();
     _bodyController.dispose();
     super.dispose();
+  }
+
+  void _toast(String message) {
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  Future<void> _pickScheduledTime() async {
+    final now = DateTime.now();
+    final date = await showDatePicker(
+      context: context,
+      initialDate: _scheduledTime ?? now,
+      firstDate: now,
+      lastDate: now.add(const Duration(days: 365)),
+    );
+    if (date == null || !mounted) return;
+    final time = await showTimePicker(
+      context: context,
+      initialTime: TimeOfDay.fromDateTime(_scheduledTime ?? now),
+    );
+    if (time == null || !mounted) return;
+    setState(() {
+      _scheduledTime = DateTime(date.year, date.month, date.day, time.hour, time.minute);
+    });
+  }
+
+  Future<void> _submit({required bool asDraft}) async {
+    final title = _titleController.text.trim();
+    final body = _bodyController.text.trim();
+    if (!asDraft) {
+      if (title.isEmpty || body.isEmpty) {
+        _toast('제목과 본문을 모두 입력해 주세요.');
+        return;
+      }
+      if (_publishOption == 'scheduled' && _scheduledTime == null) {
+        _toast('예약 일시를 선택해 주세요.');
+        return;
+      }
+    } else if (title.isEmpty && body.isEmpty) {
+      _toast('저장할 내용이 없어요.');
+      return;
+    }
+    if (_isSubmitting) return;
+    setState(() => _isSubmitting = true);
+    try {
+      await CommunityRepository.instance.createNotice(
+        kind: '공지',
+        title: title,
+        body: body,
+        status: asDraft ? 'DRAFT' : (_publishOption == 'now' ? 'PUBLISHED' : 'SCHEDULED'),
+        publishAt: asDraft ? null : (_publishOption == 'scheduled' ? _scheduledTime : null),
+        pinned: _isPinned,
+        mustRead: _isImportant,
+      );
+      if (!mounted) return;
+      _toast(asDraft ? '임시 저장되었습니다.' : '공지가 등록되었습니다.');
+      context.pop();
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      setState(() => _isSubmitting = false);
+      _toast(e.message);
+    }
   }
 
   @override
@@ -92,7 +149,7 @@ class _TeamNoticeCreateScreenState extends State<TeamNoticeCreateScreen> {
                     ),
                   ),
                   InkWell(
-                    onTap: () {},
+                    onTap: () => _toast('준비 중이에요.'),
                     borderRadius: BorderRadius.circular(20),
                     child: Container(
                       width: 36,
@@ -126,9 +183,8 @@ class _TeamNoticeCreateScreenState extends State<TeamNoticeCreateScreen> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    // 헤더 타이틀 영역
                     const Text(
-                      '공지 게시 권한 · NativeOps',
+                      '공지 게시',
                       style: TextStyle(
                         fontSize: 12,
                         fontWeight: FontWeight.bold,
@@ -228,6 +284,7 @@ class _TeamNoticeCreateScreenState extends State<TeamNoticeCreateScreen> {
                       ),
                       child: TextField(
                         controller: _titleController,
+                        enabled: !_isSubmitting,
                         style: const TextStyle(
                           fontSize: 15,
                           fontWeight: FontWeight.bold,
@@ -264,6 +321,7 @@ class _TeamNoticeCreateScreenState extends State<TeamNoticeCreateScreen> {
                       ),
                       child: TextField(
                         controller: _bodyController,
+                        enabled: !_isSubmitting,
                         maxLines: 9,
                         minLines: 7,
                         style: const TextStyle(
@@ -282,7 +340,7 @@ class _TeamNoticeCreateScreenState extends State<TeamNoticeCreateScreen> {
                     ),
                     const SizedBox(height: 24),
 
-                    // 첨부 카드
+                    // 첨부 카드 (서버에 첨부 업로드 기능이 아직 없어요)
                     Container(
                       width: double.infinity,
                       padding: const EdgeInsets.all(20),
@@ -302,51 +360,16 @@ class _TeamNoticeCreateScreenState extends State<TeamNoticeCreateScreen> {
                             ),
                           ),
                           const SizedBox(height: 12),
-                          Row(
-                            children: [
-                              Container(
-                                width: 36,
-                                height: 36,
-                                decoration: BoxDecoration(
-                                  color: const Color(0xFFEFF6FF),
-                                  borderRadius: BorderRadius.circular(10),
-                                ),
-                                child: const Icon(
-                                  Icons.description_outlined,
-                                  color: primaryBlue,
-                                  size: 20,
-                                ),
-                              ),
-                              const SizedBox(width: 12),
-                              Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: const [
-                                  Text(
-                                    '정기회의_안내.pdf',
-                                    style: TextStyle(
-                                      fontSize: 14,
-                                      fontWeight: FontWeight.bold,
-                                      color: textDark,
-                                    ),
-                                  ),
-                                  SizedBox(height: 2),
-                                  Text(
-                                    '240KB · 업로드 완료',
-                                    style: TextStyle(
-                                      fontSize: 12,
-                                      color: textLightGrey,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ],
+                          const Text(
+                            '첨부된 파일이 없어요.',
+                            style: TextStyle(fontSize: 13, color: textLightGrey),
                           ),
                           const SizedBox(height: 16),
                           SizedBox(
                             width: double.infinity,
                             height: 44,
                             child: ElevatedButton(
-                              onPressed: () {},
+                              onPressed: () => _toast('첨부 기능은 준비 중이에요.'),
                               style: ElevatedButton.styleFrom(
                                 backgroundColor: const Color(0xFFF1F5F9),
                                 elevation: 0,
@@ -405,24 +428,29 @@ class _TeamNoticeCreateScreenState extends State<TeamNoticeCreateScreen> {
                             ],
                           ),
                           const SizedBox(height: 16),
-                          Row(
-                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                            children: [
-                              const Text(
-                                '예약 일시',
-                                style: TextStyle(fontSize: 13, color: textLightGrey),
+                          if (_publishOption == 'scheduled')
+                            InkWell(
+                              onTap: _pickScheduledTime,
+                              borderRadius: BorderRadius.circular(8),
+                              child: Row(
+                                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                children: [
+                                  const Text(
+                                    '예약 일시',
+                                    style: TextStyle(fontSize: 13, color: textLightGrey),
+                                  ),
+                                  Text(
+                                    _scheduledTime == null ? '선택하기 ⌄' : _ymdHmFmt.format(_scheduledTime!),
+                                    style: const TextStyle(
+                                      fontSize: 14,
+                                      fontWeight: FontWeight.bold,
+                                      color: primaryBlue,
+                                    ),
+                                  ),
+                                ],
                               ),
-                              Text(
-                                _scheduledTime,
-                                style: const TextStyle(
-                                  fontSize: 14,
-                                  fontWeight: FontWeight.bold,
-                                  color: textDark,
-                                ),
-                              ),
-                            ],
-                          ),
-                          const SizedBox(height: 12),
+                            ),
+                          if (_publishOption == 'scheduled') const SizedBox(height: 12),
                           Row(
                             mainAxisAlignment: MainAxisAlignment.spaceBetween,
                             children: const [
@@ -455,8 +483,8 @@ class _TeamNoticeCreateScreenState extends State<TeamNoticeCreateScreen> {
                       ),
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
-                        children: const [
-                          Text(
+                        children: [
+                          const Text(
                             '푸시 미리보기',
                             style: TextStyle(
                               fontSize: 14,
@@ -464,17 +492,17 @@ class _TeamNoticeCreateScreenState extends State<TeamNoticeCreateScreen> {
                               color: textDark,
                             ),
                           ),
-                          SizedBox(height: 8),
+                          const SizedBox(height: 8),
                           Text(
-                            '전체 공지 · Native',
-                            style: TextStyle(
+                            '전체 공지 · $_selectedTarget',
+                            style: const TextStyle(
                               fontSize: 12,
                               fontWeight: FontWeight.bold,
                               color: primaryBlue,
                             ),
                           ),
-                          SizedBox(height: 4),
-                          Text(
+                          const SizedBox(height: 4),
+                          const Text(
                             '새 전체 공지가 등록됐어요',
                             style: TextStyle(
                               fontSize: 15,
@@ -482,16 +510,16 @@ class _TeamNoticeCreateScreenState extends State<TeamNoticeCreateScreen> {
                               color: textDark,
                             ),
                           ),
-                          SizedBox(height: 4),
+                          const SizedBox(height: 4),
                           Text(
-                            'Native 앱에서 공지를 확인해 주세요.',
-                            style: TextStyle(
+                            '$_selectedTarget 앱에서 공지를 확인해 주세요.',
+                            style: const TextStyle(
                               fontSize: 13,
                               color: textSub,
                             ),
                           ),
-                          SizedBox(height: 12),
-                          Text(
+                          const SizedBox(height: 12),
+                          const Text(
                             '민감 내용 숨기기 기준 미리보기 · 알림을 누르면 공지 상세로 이동해요.',
                             style: TextStyle(
                               fontSize: 11,
@@ -525,8 +553,20 @@ class _TeamNoticeCreateScreenState extends State<TeamNoticeCreateScreen> {
                           ),
                           const SizedBox(height: 12),
                           _buildChecklistItem('대상: $_selectedTarget 전체'),
-                          _buildChecklistItem('중요 표시·상단 고정 사용'),
-                          _buildChecklistItem('10.17 09:00 예약 게시'),
+                          if (_isImportant || _isPinned)
+                            _buildChecklistItem(
+                              [
+                                if (_isImportant) '중요 표시',
+                                if (_isPinned) '상단 고정',
+                              ].join('·') + ' 사용',
+                            ),
+                          _buildChecklistItem(
+                            _publishOption == 'now'
+                                ? '지금 바로 게시'
+                                : _scheduledTime == null
+                                ? '예약 게시 (일시 미선택)'
+                                : '${_ymdHmFmt.format(_scheduledTime!)} 예약 게시',
+                          ),
                           _buildChecklistItem('전체 공지 카테고리로 알림 생성'),
                           const SizedBox(height: 16),
 
@@ -537,8 +577,8 @@ class _TeamNoticeCreateScreenState extends State<TeamNoticeCreateScreen> {
                               color: const Color(0xFFEFF6FF),
                               borderRadius: BorderRadius.circular(16),
                             ),
-                            child: Row(
-                              children: const [
+                            child: const Row(
+                              children: [
                                 Icon(Icons.info_outline_rounded, color: primaryBlue, size: 18),
                                 SizedBox(width: 8),
                                 Expanded(
@@ -561,15 +601,22 @@ class _TeamNoticeCreateScreenState extends State<TeamNoticeCreateScreen> {
                             width: double.infinity,
                             height: 52,
                             child: ElevatedButton(
-                              onPressed: () => context.pop(),
+                              onPressed: _isSubmitting ? null : () => _submit(asDraft: false),
                               style: ElevatedButton.styleFrom(
                                 backgroundColor: primaryBlue,
+                                disabledBackgroundColor: primaryBlue,
                                 elevation: 0,
                                 shape: RoundedRectangleBorder(
                                   borderRadius: BorderRadius.circular(16),
                                 ),
                               ),
-                              child: Text(
+                              child: _isSubmitting
+                                  ? const SizedBox(
+                                width: 20,
+                                height: 20,
+                                child: CircularProgressIndicator(strokeWidth: 2.2, color: Colors.white),
+                              )
+                                  : Text(
                                 _publishOption == 'now' ? '대상 확인 · 지금 게시 확정' : '대상 확인 · 예약 게시 확정',
                                 style: const TextStyle(
                                   fontSize: 15,
@@ -586,9 +633,10 @@ class _TeamNoticeCreateScreenState extends State<TeamNoticeCreateScreen> {
                             width: double.infinity,
                             height: 52,
                             child: ElevatedButton(
-                              onPressed: () => context.pop(),
+                              onPressed: _isSubmitting ? null : () => _submit(asDraft: true),
                               style: ElevatedButton.styleFrom(
                                 backgroundColor: const Color(0xFFF1F5F9),
+                                disabledBackgroundColor: const Color(0xFFF1F5F9),
                                 elevation: 0,
                                 shape: RoundedRectangleBorder(
                                   borderRadius: BorderRadius.circular(16),
@@ -605,13 +653,6 @@ class _TeamNoticeCreateScreenState extends State<TeamNoticeCreateScreen> {
                             ),
                           ),
                         ],
-                      ),
-                    ),
-                    const SizedBox(height: 16),
-                    const Center(
-                      child: Text(
-                        'Native · 개념 데이터로 구성한 화면 예시',
-                        style: TextStyle(fontSize: 12, color: textLightGrey),
                       ),
                     ),
                     const SizedBox(height: 24),
@@ -739,12 +780,14 @@ class _TeamNoticeCreateScreenState extends State<TeamNoticeCreateScreen> {
         children: [
           const Icon(Icons.check_rounded, size: 16, color: primaryBlue),
           const SizedBox(width: 6),
-          Text(
-            text,
-            style: const TextStyle(
-              fontSize: 13,
-              fontWeight: FontWeight.w600,
-              color: textDark,
+          Expanded(
+            child: Text(
+              text,
+              style: const TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w600,
+                color: textDark,
+              ),
             ),
           ),
         ],

@@ -1,6 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import '../app/router.dart';
+import 'package:teamspace/core/network/api_exception.dart';
+import 'package:teamspace/core/notification/notification_permission.dart';
+import 'package:teamspace/data/models/notification_settings.dart';
+import 'package:teamspace/data/repositories/home_repository.dart';
 
 class NotificationSettingScreen extends StatefulWidget {
   const NotificationSettingScreen({super.key});
@@ -10,7 +14,46 @@ class NotificationSettingScreen extends StatefulWidget {
 }
 
 class _NotificationSettingScreenState extends State<NotificationSettingScreen> {
+  // 잠금화면 미리보기 방식 (서버에 저장할 필드가 없어서 이 화면에서만 써요)
   bool _hideSensitiveContent = true;
+  bool _isSaving = false;
+
+  /// [알림 허용하기]
+  /// 1) 기기 알림 권한 창을 띄우고
+  /// 2) 서버 설정에서 푸시를 켜요 (push: true)
+  /// 3) 허용했으면 이전 화면으로, 거절했거나 확인할 수 없으면 수신 진단 화면으로 가요
+  Future<void> _allowNotifications() async {
+    setState(() => _isSaving = true);
+    try {
+      final status = await NotificationPermission.request();
+
+      await HomeRepository.instance.updateNotificationSettings(
+        current: NotificationSettings.defaults,
+        push: true,
+      );
+      if (!mounted) return;
+
+      if (status == DeviceNotificationStatus.granted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('알림을 켰어요. 새 요청이 오면 바로 알려드릴게요.')),
+        );
+        if (context.canPop()) {
+          context.pop();
+        } else {
+          context.go(AppRoutes.home);
+        }
+      } else {
+        context.push(AppRoutes.notificationDiagnose);
+      }
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(e.message)),
+      );
+    } finally {
+      if (mounted) setState(() => _isSaving = false);
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -378,22 +421,30 @@ class _NotificationSettingScreenState extends State<NotificationSettingScreen> {
 
                   const SizedBox(height: 24),
 
-                  // [알림 허용하기] 터치 시 02-7 화면으로 이동
+                  // [알림 허용하기] 권한 창 → 허용하면 이전 화면, 아니면 02-7 수신 진단 화면
                   SizedBox(
                     width: double.infinity,
                     height: 52,
                     child: ElevatedButton(
-                      onPressed: () {
-                        context.push(AppRoutes.notificationDiagnose);
-                      },
+                      onPressed: _isSaving ? null : _allowNotifications,
                       style: ElevatedButton.styleFrom(
                         backgroundColor: primaryBlue,
+                        disabledBackgroundColor: primaryBlue.withOpacity(0.6),
                         elevation: 0,
                         shape: RoundedRectangleBorder(
                           borderRadius: BorderRadius.circular(14),
                         ),
                       ),
-                      child: const Text(
+                      child: _isSaving
+                          ? const SizedBox(
+                        width: 22,
+                        height: 22,
+                        child: CircularProgressIndicator(
+                          color: Colors.white,
+                          strokeWidth: 2.5,
+                        ),
+                      )
+                          : const Text(
                         '알림 허용하기',
                         style: TextStyle(
                           fontSize: 15,

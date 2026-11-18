@@ -1,8 +1,62 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
+import 'package:teamspace/core/network/api_exception.dart';
+import 'package:teamspace/data/models/home_models.dart';
+import 'package:teamspace/data/models/my_space_models.dart';
+import 'package:teamspace/data/repositories/home_repository.dart';
+import '../app/router.dart';
 
-class MyPermissionAccessScreen extends StatelessWidget {
+class MyPermissionAccessScreen extends StatefulWidget {
   const MyPermissionAccessScreen({super.key});
+
+  @override
+  State<MyPermissionAccessScreen> createState() => _MyPermissionAccessScreenState();
+}
+
+class _MyPermissionAccessScreenState extends State<MyPermissionAccessScreen> {
+  MyProfile? _me; // GET /me (roles 로 역할을 판단해요)
+  String? _errorMessage;
+
+  /// 모든 구성원이 할 수 있는 일
+  static const List<String> _baseFeatures = [
+    '내 알림 · 프로필 · 일정 확인',
+    '문서 작성 · 제출, 내 문서 결과 확인',
+    '프로젝트 탐색 · 참여 신청',
+    '게시글 · 댓글 실명/익명 선택 작성',
+    '공식 문의 제출 · 내 문의 확인',
+    '공개 규칙 · 재정 요약 열람',
+  ];
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    setState(() => _errorMessage = null);
+    try {
+      final me = await HomeRepository.instance.getMe();
+      if (!mounted) return;
+      setState(() => _me = me);
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      setState(() => _errorMessage = e.message);
+    }
+  }
+
+  /// 내 역할에 따라 더 할 수 있는 일
+  List<String> _extraFeatures(Set<String> roles) {
+    return [
+      if (roles.contains('admin')) ...[
+        '일정 등록 · 삭제, 공지 게시',
+        '가입 요청 승인 · 계정 관리',
+      ],
+      if (roles.contains('fa') || roles.contains('admin')) '재정 세부 내역 열람 · 예산 검토',
+      if (roles.contains('leader') || roles.contains('lead')) '지정된 결재 처리 · 조직 운영 범위 확인',
+      if (roles.contains('pm')) '담당 프로젝트 편집 · 지원자 검토',
+    ];
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -11,6 +65,17 @@ class MyPermissionAccessScreen extends StatelessWidget {
     const textDark = Color(0xFF111827);
     const textSub = Color(0xFF64748B);
     const textLightGrey = Color(0xFF94A3B8);
+
+    final me = _me;
+    final role = me == null ? null : RoleInfo.of(me.roles);
+    final roleSet = me == null ? <String>{} : me.roles.map((r) => r.trim().toLowerCase()).toSet();
+    final affiliation = me == null
+        ? '-'
+        : [
+      if (me.dept.isNotEmpty) me.dept,
+      if (me.major.isNotEmpty) me.major,
+    ].join(' · ');
+    final features = [..._baseFeatures, ..._extraFeatures(roleSet)];
 
     return Scaffold(
       backgroundColor: bgColor,
@@ -24,7 +89,13 @@ class MyPermissionAccessScreen extends StatelessWidget {
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
                   InkWell(
-                    onTap: () => context.pop(),
+                    onTap: () {
+                      if (context.canPop()) {
+                        context.pop();
+                      } else {
+                        context.go(AppRoutes.workspace);
+                      }
+                    },
                     borderRadius: BorderRadius.circular(20),
                     child: Container(
                       width: 36,
@@ -162,9 +233,9 @@ class MyPermissionAccessScreen extends StatelessWidget {
                                   color: const Color(0xFFEFF6FF),
                                   borderRadius: BorderRadius.circular(12),
                                 ),
-                                child: const Text(
-                                  '구성원 · 옥물결',
-                                  style: TextStyle(
+                                child: Text(
+                                  me == null ? '확인 중' : '${role!.label} · ${me.name}',
+                                  style: const TextStyle(
                                     fontSize: 12,
                                     fontWeight: FontWeight.bold,
                                     color: primaryBlue,
@@ -176,19 +247,44 @@ class MyPermissionAccessScreen extends StatelessWidget {
                           const SizedBox(height: 16),
                           Row(
                             mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                            children: const [
-                              Text('소속', style: TextStyle(fontSize: 13, color: textSub)),
-                              Text('NativeLab · Design', style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: textDark)),
+                            children: [
+                              const Text('소속', style: TextStyle(fontSize: 13, color: textSub)),
+                              const SizedBox(width: 16),
+                              Flexible(
+                                child: Text(
+                                  affiliation,
+                                  textAlign: TextAlign.right,
+                                  style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: textDark),
+                                ),
+                              ),
                             ],
                           ),
                           const SizedBox(height: 10),
                           Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
                             mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                            children: const [
-                              Text('추가 운영 권한', style: TextStyle(fontSize: 13, color: textSub)),
-                              Text('없음', style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: textDark)),
+                            children: [
+                              const Text('추가 운영 권한', style: TextStyle(fontSize: 13, color: textSub)),
+                              const SizedBox(width: 16),
+                              Flexible(
+                                child: Text(
+                                  role == null ? '-' : (role.hasExtra ? role.description : '없음'),
+                                  textAlign: TextAlign.right,
+                                  style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: textDark),
+                                ),
+                              ),
                             ],
                           ),
+                          if (_errorMessage != null) ...[
+                            const SizedBox(height: 10),
+                            GestureDetector(
+                              onTap: _load,
+                              child: Text(
+                                '$_errorMessage 눌러서 다시 시도',
+                                style: const TextStyle(fontSize: 12, color: Color(0xFFEF4444)),
+                              ),
+                            ),
+                          ],
                           const SizedBox(height: 14),
                           const Text(
                             '여기서는 역할을 직접 변경할 수 없어요.',
@@ -213,12 +309,12 @@ class MyPermissionAccessScreen extends StatelessWidget {
                             ),
                           ),
                           const SizedBox(height: 14),
-                          _buildCheckItem('내 알림 · 프로필 · 일정 확인'),
-                          _buildCheckItem('문서 작성 · 제출, 내 문서 결과 확인'),
-                          _buildCheckItem('프로젝트 탐색 · 참여 신청'),
-                          _buildCheckItem('게시글 · 댓글 실명/익명 선택 작성'),
-                          _buildCheckItem('공식 문의 제출 · 내 문의 확인'),
-                          _buildCheckItem('공개 규칙 · 재정 요약 열람', isLast: true),
+                          for (int i = 0; i < features.length; i++)
+                            _buildCheckItem(
+                              features[i],
+                              isExtra: i >= _baseFeatures.length,
+                              isLast: i == features.length - 1,
+                            ),
                         ],
                       ),
                     ),
@@ -250,9 +346,9 @@ class MyPermissionAccessScreen extends StatelessWidget {
 
                     // 카드 4: 제한되는 재정 항목
                     _buildCardContainer(
-                      child: Column(
+                      child: const Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
-                        children: const [
+                        children: [
                           Text(
                             '제한되는 재정 항목',
                             style: TextStyle(
@@ -323,14 +419,8 @@ class MyPermissionAccessScreen extends StatelessWidget {
                             width: double.infinity,
                             height: 52,
                             child: ElevatedButton(
-                              onPressed: () {
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  const SnackBar(
-                                    content: Text('업무용 권한 요청 문의로 연결합니다.'),
-                                    duration: Duration(seconds: 1),
-                                  ),
-                                );
-                              },
+                              // 공식 문의 작성 화면으로 가요 (담당: NativeOps)
+                              onPressed: () => context.push(AppRoutes.anonymousInquiry),
                               style: ElevatedButton.styleFrom(
                                 backgroundColor: primaryBlue,
                                 elevation: 0,
@@ -381,26 +471,29 @@ class MyPermissionAccessScreen extends StatelessWidget {
     );
   }
 
-  Widget _buildCheckItem(String text, {bool isLast = false}) {
+  /// isExtra: 내 역할 덕분에 추가로 할 수 있는 일 (파란색으로 보여줘요)
+  Widget _buildCheckItem(String text, {bool isExtra = false, bool isLast = false}) {
+    final color = isExtra ? const Color(0xFF3182F6) : const Color(0xFF64748B);
     return Padding(
       padding: EdgeInsets.only(bottom: isLast ? 0 : 10),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text(
+          Text(
             '✓ ',
             style: TextStyle(
               fontSize: 13,
               fontWeight: FontWeight.bold,
-              color: Color(0xFF64748B),
+              color: color,
             ),
           ),
           Expanded(
             child: Text(
               text,
-              style: const TextStyle(
+              style: TextStyle(
                 fontSize: 13,
-                color: Color(0xFF4B5563),
+                fontWeight: isExtra ? FontWeight.bold : FontWeight.normal,
+                color: isExtra ? const Color(0xFF3182F6) : const Color(0xFF4B5563),
               ),
             ),
           ),

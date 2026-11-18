@@ -1,6 +1,12 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import '../app/router.dart';
+import 'package:teamspace/core/network/api_exception.dart';
+import 'package:teamspace/data/models/document_models.dart';
+import 'package:teamspace/data/repositories/document_repository.dart';
+import 'package:teamspace/shared/widgets/state_views.dart';
 
 class DocumentSearchScreen extends StatefulWidget {
   const DocumentSearchScreen({super.key});
@@ -10,38 +16,68 @@ class DocumentSearchScreen extends StatefulWidget {
 }
 
 class _DocumentSearchScreenState extends State<DocumentSearchScreen> {
-  final TextEditingController _searchController = TextEditingController(text: '정산');
+  final TextEditingController _searchController = TextEditingController();
   int _selectedKeywordIndex = 0;
+  Timer? _debounce;
 
-  // 최근 검색어 칩 목록
+  // 추천 검색어 칩 목록 (첫 칩은 검색어 비우기)
   final List<String> _keywords = const ['최근 검색', '수금', '품의서', '회의'];
 
-  // 시안 06-2 검색 결과 3건 (Dart 3 Record 타입)
-  final List<({String tag, String date, String title, String desc})> _searchResults = const [
-    (
-    tag: 'FINANCE',
-    date: '2026.10.15',
-    title: '외주 수급 및 풀 배분 기준',
-    desc: '···배분과 정산 방식을 정리해요',
-    ),
-    (
-    tag: 'GUIDE',
-    date: '2026.10.08',
-    title: '외주 프로젝트 진행 가이드',
-    desc: '···납품 후 정산 요청 순서',
-    ),
-    (
-    tag: 'TEMPLATE',
-    date: '2026.09.20',
-    title: '정산 요청서',
-    desc: '프로젝트 종료 후 정산을 요청하는 양식',
-    ),
-  ];
+  List<DocumentItem> _results = [];
+  bool _isLoading = false;
+  String? _errorMessage;
+  String _query = '';
 
   @override
   void dispose() {
+    _debounce?.cancel();
     _searchController.dispose();
     super.dispose();
+  }
+
+  void _onChanged(String value) {
+    _debounce?.cancel();
+    _debounce = Timer(const Duration(milliseconds: 500), () => _runSearch(value));
+    setState(() {});
+  }
+
+  Future<void> _runSearch(String value) async {
+    final trimmed = value.trim();
+    setState(() => _query = trimmed);
+    if (trimmed.isEmpty) {
+      setState(() {
+        _results = [];
+        _errorMessage = null;
+        _isLoading = false;
+      });
+      return;
+    }
+    setState(() {
+      _isLoading = true;
+      _errorMessage = null;
+    });
+    try {
+      final result = await DocumentRepository.instance.getDocs(q: trimmed, limit: 50);
+      if (!mounted) return;
+      setState(() {
+        _results = result.items;
+        _isLoading = false;
+      });
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _errorMessage = e.message;
+        _isLoading = false;
+      });
+    }
+  }
+
+  void _toast(String message) {
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(content: Text(message), behavior: SnackBarBehavior.floating),
+      );
   }
 
   @override
@@ -49,7 +85,6 @@ class _DocumentSearchScreenState extends State<DocumentSearchScreen> {
     const bgColor = Color(0xFFF4F6F9);
     const primaryBlue = Color(0xFF2F80ED);
     const textDark = Color(0xFF111827);
-    const textGrey = Color(0xFF8E8E93);
 
     return Scaffold(
       backgroundColor: bgColor,
@@ -59,7 +94,7 @@ class _DocumentSearchScreenState extends State<DocumentSearchScreen> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              // 1. 검색 입력 바 & 취소 버튼 (시안 06-2 상단)
+              // 1. 검색 입력 바 & 취소 버튼
               Row(
                 children: [
                   Expanded(
@@ -81,6 +116,9 @@ class _DocumentSearchScreenState extends State<DocumentSearchScreen> {
                           Expanded(
                             child: TextField(
                               controller: _searchController,
+                              autofocus: true,
+                              onChanged: _onChanged,
+                              onSubmitted: _runSearch,
                               style: const TextStyle(
                                 fontSize: 14,
                                 fontWeight: FontWeight.w500,
@@ -100,9 +138,8 @@ class _DocumentSearchScreenState extends State<DocumentSearchScreen> {
                           if (_searchController.text.isNotEmpty)
                             GestureDetector(
                               onTap: () {
-                                setState(() {
-                                  _searchController.clear();
-                                });
+                                _searchController.clear();
+                                _runSearch('');
                               },
                               child: Container(
                                 width: 20,
@@ -147,7 +184,16 @@ class _DocumentSearchScreenState extends State<DocumentSearchScreen> {
                     return Padding(
                       padding: const EdgeInsets.only(right: 8),
                       child: GestureDetector(
-                        onTap: () => setState(() => _selectedKeywordIndex = index),
+                        onTap: () {
+                          setState(() => _selectedKeywordIndex = index);
+                          if (index == 0) {
+                            _searchController.clear();
+                            _runSearch('');
+                          } else {
+                            _searchController.text = _keywords[index];
+                            _runSearch(_keywords[index]);
+                          }
+                        },
                         child: AnimatedContainer(
                           duration: const Duration(milliseconds: 150),
                           padding: const EdgeInsets.symmetric(
@@ -175,109 +221,141 @@ class _DocumentSearchScreenState extends State<DocumentSearchScreen> {
               ),
               const SizedBox(height: 20),
 
-              // 3. 검색 결과 헤더
-              Row(
-                children: [
-                  Text(
-                    '검색 결과 ${_searchResults.length}',
-                    style: const TextStyle(
-                      fontSize: 14,
-                      fontWeight: FontWeight.bold,
-                      color: textDark,
-                    ),
+              if (_query.isEmpty) ...[
+                const Padding(
+                  padding: EdgeInsets.symmetric(vertical: 30),
+                  child: Text(
+                    '검색어를 입력하거나 추천 검색어를 선택해 보세요.',
+                    style: TextStyle(fontSize: 13, color: Color(0xFF94A3B8)),
                   ),
-                ],
-              ),
-              const SizedBox(height: 12),
-
-              // 4. 검색 결과 카드 그룹
-              Container(
-                decoration: BoxDecoration(
-                  color: Colors.white,
-                  borderRadius: BorderRadius.circular(24),
                 ),
-                child: ListView.separated(
-                  shrinkWrap: true,
-                  physics: const NeverScrollableScrollPhysics(),
-                  itemCount: _searchResults.length,
-                  separatorBuilder: (context, index) => const Divider(
-                    height: 1,
-                    thickness: 1,
-                    color: Color(0xFFF1F5F9),
-                    indent: 16,
-                    endIndent: 16,
-                  ),
-                  itemBuilder: (context, index) {
-                    final doc = _searchResults[index];
-
-                    return InkWell(
-                      onTap: () {
-                        if (doc.tag == 'TEMPLATE') {
-                          context.push(AppRoutes.templateDetail);
-                        }
-                      },
-                      borderRadius: BorderRadius.vertical(
-                        top: index == 0 ? const Radius.circular(24) : Radius.zero,
-                        bottom: index == _searchResults.length - 1
-                            ? const Radius.circular(24)
-                            : Radius.zero,
+              ] else if (_isLoading) ...[
+                const SkeletonList(count: 3),
+              ] else if (_errorMessage != null) ...[
+                ErrorStateView(
+                  title: '검색하지 못했어요',
+                  message: _errorMessage,
+                  onRetry: () => _runSearch(_query),
+                ),
+              ] else ...[
+                // 3. 검색 결과 헤더
+                Row(
+                  children: [
+                    Text(
+                      '검색 결과 ${_results.length}',
+                      style: const TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.bold,
+                        color: textDark,
                       ),
-                      child: Padding(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 20,
-                          vertical: 18,
-                        ),
-                        child: Row(
-                          children: [
-                            Expanded(
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Row(
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 12),
+
+                // 4. 검색 결과 카드 그룹
+                if (_results.isEmpty)
+                  const Padding(
+                    padding: EdgeInsets.symmetric(vertical: 30),
+                    child: EmptyStateView(
+                      icon: Icons.search_off_rounded,
+                      title: '검색 결과가 없어요',
+                      description: '다른 검색어로 다시 찾아보세요.',
+                    ),
+                  )
+                else
+                  Container(
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(24),
+                    ),
+                    child: ListView.separated(
+                      shrinkWrap: true,
+                      physics: const NeverScrollableScrollPhysics(),
+                      itemCount: _results.length,
+                      separatorBuilder: (context, index) => const Divider(
+                        height: 1,
+                        thickness: 1,
+                        color: Color(0xFFF1F5F9),
+                        indent: 16,
+                        endIndent: 16,
+                      ),
+                      itemBuilder: (context, index) {
+                        final doc = _results[index];
+
+                        return InkWell(
+                          onTap: () {
+                            if (doc.isTemplate) {
+                              context.push('${AppRoutes.templateDetail}?slug=${doc.slug}');
+                            } else {
+                              _toast('문서 상세 보기는 준비 중이에요.');
+                            }
+                          },
+                          borderRadius: BorderRadius.vertical(
+                            top: index == 0 ? const Radius.circular(24) : Radius.zero,
+                            bottom: index == _results.length - 1
+                                ? const Radius.circular(24)
+                                : Radius.zero,
+                          ),
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 20,
+                              vertical: 18,
+                            ),
+                            child: Row(
+                              children: [
+                                Expanded(
+                                  child: Column(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
                                     children: [
-                                      _buildTagChip(doc.tag),
-                                      const SizedBox(width: 8),
+                                      Row(
+                                        children: [
+                                          _buildTagChip(doc.type),
+                                          const SizedBox(width: 8),
+                                          Text(
+                                            doc.date,
+                                            style: const TextStyle(
+                                              fontSize: 11,
+                                              color: Color(0xFFA0AEC0),
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                      const SizedBox(height: 8),
                                       Text(
-                                        doc.date,
+                                        doc.title,
                                         style: const TextStyle(
-                                          fontSize: 11,
-                                          color: Color(0xFFA0AEC0),
+                                          fontSize: 14,
+                                          fontWeight: FontWeight.bold,
+                                          color: textDark,
+                                        ),
+                                      ),
+                                      const SizedBox(height: 4),
+                                      Text(
+                                        doc.copy,
+                                        maxLines: 2,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: const TextStyle(
+                                          fontSize: 12,
+                                          color: Color(0xFF94A3B8),
                                         ),
                                       ),
                                     ],
                                   ),
-                                  const SizedBox(height: 8),
-                                  Text(
-                                    doc.title,
-                                    style: const TextStyle(
-                                      fontSize: 14,
-                                      fontWeight: FontWeight.bold,
-                                      color: textDark,
-                                    ),
-                                  ),
-                                  const SizedBox(height: 4),
-                                  Text(
-                                    doc.desc,
-                                    style: const TextStyle(
-                                      fontSize: 12,
-                                      color: Color(0xFF94A3B8),
-                                    ),
-                                  ),
-                                ],
-                              ),
+                                ),
+                                const Icon(
+                                  Icons.chevron_right_rounded,
+                                  color: Color(0xFFCBD5E1),
+                                  size: 20,
+                                ),
+                              ],
                             ),
-                            const Icon(
-                              Icons.chevron_right_rounded,
-                              color: Color(0xFFCBD5E1),
-                              size: 20,
-                            ),
-                          ],
-                        ),
-                      ),
-                    );
-                  },
-                ),
-              ),
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+              ],
               const SizedBox(height: 30),
             ],
           ),
@@ -288,7 +366,7 @@ class _DocumentSearchScreenState extends State<DocumentSearchScreen> {
 
   // 문서 카테고리 태그 칩
   Widget _buildTagChip(String tag) {
-    final (textColor, bgColor) = switch (tag) {
+    final (textColor, bgColor) = switch (tag.toUpperCase()) {
       'RULE' => (const Color(0xFFFF9500), const Color(0xFFFFF3E0)),
       'FINANCE' => (const Color(0xFF2F80ED), const Color(0xFFEFF6FF)),
       'TEMPLATE' => (const Color(0xFF9333EA), const Color(0xFFF3E8FF)),
@@ -303,7 +381,7 @@ class _DocumentSearchScreenState extends State<DocumentSearchScreen> {
         borderRadius: BorderRadius.circular(6),
       ),
       child: Text(
-        tag,
+        tag.isEmpty ? '문서' : tag,
         style: TextStyle(
           fontSize: 10,
           fontWeight: FontWeight.w700,

@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:teamspace/app/constants.dart';
 
 class DefaultProfileAvatar extends StatelessWidget {
   final double size;
@@ -14,9 +15,18 @@ class DefaultProfileAvatar extends StatelessWidget {
     this.imageUrl,
   });
 
+  /// 서버가 주는 photo는 "/people/{id}/photo?v=hash" 같은 상대 경로예요.
+  /// 이미 http(s)로 시작하면(예: 예전 데이터) 그대로 쓰고, 아니면 API 베이스 URL을 붙여요.
+  static String resolveUrl(String path) {
+    if (path.isEmpty) return '';
+    if (path.startsWith('http://') || path.startsWith('https://')) return path;
+    final base = AppConstants.apiBaseUrl;
+    return path.startsWith('/') ? '$base$path' : '$base/$path';
+  }
+
   @override
   Widget build(BuildContext context) {
-    final url = imageUrl?.trim() ?? '';
+    final url = resolveUrl(imageUrl?.trim() ?? '');
 
     final defaultAvatar = SizedBox(
       width: size,

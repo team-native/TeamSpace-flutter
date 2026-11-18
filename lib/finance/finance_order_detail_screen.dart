@@ -1,7 +1,81 @@
 import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
+import 'package:intl/intl.dart';
+import 'package:teamspace/core/network/api_exception.dart';
+import 'package:teamspace/data/models/finance_models.dart';
+import 'package:teamspace/data/repositories/finance_repository.dart';
+import 'package:teamspace/shared/widgets/state_views.dart';
 
-class FinanceOrderDetailScreen extends StatelessWidget {
+class FinanceOrderDetailScreen extends StatefulWidget {
   const FinanceOrderDetailScreen({super.key});
+
+  @override
+  State<FinanceOrderDetailScreen> createState() => _FinanceOrderDetailScreenState();
+}
+
+class _FinanceOrderDetailScreenState extends State<FinanceOrderDetailScreen> {
+  static final NumberFormat _money = NumberFormat.decimalPattern('ko_KR');
+
+  bool _started = false;
+  String _project = '';
+  FinanceReceipt? _receipt;
+
+  bool _isLoading = true;
+  String? _errorMessage;
+  FinanceContract? _contract;
+  List<FinanceSummaryPool> _pools = const [];
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_started) return;
+    _started = true;
+
+    final state = GoRouterState.of(context);
+    _project = state.uri.queryParameters['project'] ?? '';
+    final extra = state.extra;
+    if (extra is FinanceReceipt) {
+      _receipt = extra;
+      _project = _project.isNotEmpty ? _project : extra.project;
+    }
+    _load();
+  }
+
+  Future<void> _load() async {
+    setState(() {
+      _isLoading = true;
+      _errorMessage = null;
+    });
+    try {
+      final results = await Future.wait([
+        if (_project.isNotEmpty)
+          FinanceRepository.instance.getContract(_project)
+        else
+          Future<FinanceContract?>.value(null),
+        FinanceRepository.instance.getSummary(),
+      ]);
+      if (!mounted) return;
+      setState(() {
+        _contract = results[0] as FinanceContract?;
+        _pools = (results[1] as FinanceSummary).pools;
+        _isLoading = false;
+      });
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _errorMessage = e.message;
+        _isLoading = false;
+      });
+    }
+  }
+
+  void _toast(String message) {
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(content: Text(message), behavior: SnackBarBehavior.floating),
+      );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -10,6 +84,18 @@ class FinanceOrderDetailScreen extends StatelessWidget {
     const textDark = Color(0xFF111827);
     const textGrey = Color(0xFF8E8E93);
     const cardBorderColor = Color(0x1A000000);
+
+    final receipt = _receipt;
+    final contract = _contract;
+    final title = contract?.title.isNotEmpty == true
+        ? contract!.title
+        : (receipt?.project.isNotEmpty == true ? receipt!.project : _project);
+    final subtitle = contract?.description.isNotEmpty == true
+        ? contract!.description
+        : (receipt?.client ?? '');
+    final amount = receipt?.amount ?? contract?.amount;
+    final status = receipt?.status ?? '';
+    final steps = contract?.steps ?? const <Map<String, dynamic>>[];
 
     return Scaffold(
       backgroundColor: bgColor,
@@ -28,11 +114,22 @@ class FinanceOrderDetailScreen extends StatelessWidget {
         actions: [
           IconButton(
             icon: const Icon(Icons.link_rounded, color: textDark, size: 22),
-            onPressed: () {},
+            onPressed: () => _toast('준비 중이에요.'),
           ),
         ],
       ),
-      body: SingleChildScrollView(
+      body: _isLoading
+          ? const Padding(
+        padding: EdgeInsets.all(20),
+        child: SkeletonList(count: 4),
+      )
+          : _errorMessage != null
+          ? ErrorStateView(
+        title: '수주 상세를 불러오지 못했어요',
+        message: _errorMessage,
+        onRetry: _load,
+      )
+          : SingleChildScrollView(
         padding: const EdgeInsets.all(20),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -49,43 +146,34 @@ class FinanceOrderDetailScreen extends StatelessWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Row(
-                    children: [
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                        decoration: BoxDecoration(
-                          color: const Color(0xFFEBF3FF),
-                          borderRadius: BorderRadius.circular(6),
+                  if (status.isNotEmpty)
+                    Row(
+                      children: [
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFFEBF3FF),
+                            borderRadius: BorderRadius.circular(6),
+                          ),
+                          child: Text(
+                            status,
+                            style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: primaryBlue),
+                          ),
                         ),
-                        child: const Text(
-                          '수금 완료',
-                          style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: primaryBlue),
-                        ),
-                      ),
-                      const SizedBox(width: 6),
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                        decoration: BoxDecoration(
-                          color: const Color(0xFFF3F4F6),
-                          borderRadius: BorderRadius.circular(6),
-                        ),
-                        child: const Text(
-                          '착수',
-                          style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Color(0xFF4B5563)),
-                        ),
-                      ),
-                    ],
+                      ],
+                    ),
+                  SizedBox(height: status.isNotEmpty ? 12 : 0),
+                  Text(
+                    title.isNotEmpty ? title : '프로젝트 미지정',
+                    style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w800, color: textDark),
                   ),
-                  const SizedBox(height: 12),
-                  const Text(
-                    'BRIDGE',
-                    style: TextStyle(fontSize: 22, fontWeight: FontWeight.w800, color: textDark),
-                  ),
-                  const SizedBox(height: 2),
-                  const Text(
-                    'iOS 앱 프로토타입 · 클라이언트 브릿지랩스',
-                    style: TextStyle(fontSize: 12, color: textGrey),
-                  ),
+                  if (subtitle.isNotEmpty) ...[
+                    const SizedBox(height: 2),
+                    Text(
+                      subtitle,
+                      style: const TextStyle(fontSize: 12, color: textGrey),
+                    ),
+                  ],
                   const SizedBox(height: 16),
                   const Divider(color: Color(0xFFF3F4F6)),
                   const SizedBox(height: 12),
@@ -94,86 +182,101 @@ class FinanceOrderDetailScreen extends StatelessWidget {
                   Row(
                     crossAxisAlignment: CrossAxisAlignment.baseline,
                     textBaseline: TextBaseline.alphabetic,
-                    children: const [
+                    children: [
                       Text(
-                        '3,600,000',
-                        style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800, color: textDark),
+                        amount != null ? _money.format(amount) : '확인 필요',
+                        style: const TextStyle(
+                          fontSize: 24,
+                          fontWeight: FontWeight.w800,
+                          color: textDark,
+                        ),
                       ),
-                      SizedBox(width: 4),
-                      Text(
-                        '원',
-                        style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: textDark),
-                      ),
+                      if (amount != null) ...[
+                        const SizedBox(width: 4),
+                        const Text(
+                          '원',
+                          style: TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.bold,
+                            color: textDark,
+                          ),
+                        ),
+                      ],
                     ],
                   ),
-                  const SizedBox(height: 4),
-                  const Text(
-                    '2026.10.18 입금 확인 · 부가세 별도',
-                    style: TextStyle(fontSize: 11, color: textGrey),
-                  ),
+                  if (receipt != null && receipt.date.isNotEmpty) ...[
+                    const SizedBox(height: 4),
+                    Text(
+                      '${receipt.date} 기준${contract?.vatIncluded == false ? ' · 부가세 별도' : ''}',
+                      style: const TextStyle(fontSize: 11, color: textGrey),
+                    ),
+                  ],
                 ],
               ),
             ),
 
             const SizedBox(height: 20),
 
-            // 진행 단계
-            Container(
-              width: double.infinity,
-              padding: const EdgeInsets.all(20),
-              decoration: BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.circular(20),
-                border: Border.all(color: cardBorderColor),
+            // 진행 단계 (서버에 단계 정보가 있을 때만 표시)
+            if (steps.isNotEmpty)
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(20),
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(20),
+                  border: Border.all(color: cardBorderColor),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      '진행 단계',
+                      style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold, color: textDark),
+                    ),
+                    const SizedBox(height: 16),
+                    for (var i = 0; i < steps.length; i++) ...[
+                      _buildStepItem(
+                        title: (steps[i]['title'] ?? '').toString(),
+                        subtitle: (steps[i]['subtitle'] ?? '').toString(),
+                        isDone: steps[i]['done'] == true,
+                      ),
+                      if (i != steps.length - 1) _buildStepLine(),
+                    ],
+                  ],
+                ),
               ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text(
-                    '진행 단계',
-                    style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold, color: textDark),
-                  ),
-                  const SizedBox(height: 16),
-                  _buildStepItem(title: '계약', subtitle: '08.02 · 계약서 서명', isDone: true),
-                  _buildStepLine(),
-                  _buildStepItem(title: '착수', subtitle: '08.05 · 킥오프 미팅', isDone: true),
-                  _buildStepLine(),
-                  _buildStepItem(title: '납품', subtitle: '10.10 · 최종 산출물 전달', isDone: true),
-                  _buildStepLine(),
-                  _buildStepItem(title: '입금 완료', subtitle: '10.18 · 3,600,000원', isDone: true, isLast: true),
-                ],
-              ),
-            ),
+            if (steps.isNotEmpty) const SizedBox(height: 20),
 
-            const SizedBox(height: 20),
-
-            // 이 금액의 몫 배분
-            Container(
-              width: double.infinity,
-              padding: const EdgeInsets.all(20),
-              decoration: BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.circular(20),
-                border: Border.all(color: cardBorderColor),
+            // 이 금액의 몫 배분 (전체 재무 풀 비율을 이 수주 금액에 적용)
+            if (amount != null && _pools.isNotEmpty)
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(20),
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(20),
+                  border: Border.all(color: cardBorderColor),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      '이 금액의 몫 배분',
+                      style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold, color: textDark),
+                    ),
+                    const SizedBox(height: 14),
+                    for (var i = 0; i < _pools.length; i++) ...[
+                      if (i > 0) const SizedBox(height: 10),
+                      _buildAllocationRow(
+                        '${_pools[i].label} ${_pools[i].ratio}%',
+                        '${_money.format((amount * _pools[i].ratio / 100).round())}원',
+                      ),
+                    ],
+                  ],
+                ),
               ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text(
-                    '이 금액의 몫 배분',
-                    style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold, color: textDark),
-                  ),
-                  const SizedBox(height: 14),
-                  _buildAllocationRow('운영풀 40%', '1,440,000원'),
-                  const SizedBox(height: 10),
-                  _buildAllocationRow('작업풀 30%', '1,080,000원'),
-                  const SizedBox(height: 10),
-                  _buildAllocationRow('배당풀 30%', '1,080,000원'),
-                ],
-              ),
-            ),
-
-            const SizedBox(height: 20),
+            if (amount != null && _pools.isNotEmpty) const SizedBox(height: 20),
 
             // 관련 정보
             Container(
@@ -192,33 +295,63 @@ class FinanceOrderDetailScreen extends StatelessWidget {
                     style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold, color: textDark),
                   ),
                   const SizedBox(height: 14),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: const [
-                      Text('담당 PM', style: TextStyle(fontSize: 13, color: textGrey)),
-                      Text('이사유', style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: textDark)),
-                    ],
-                  ),
-                  const SizedBox(height: 10),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: const [
-                      Text('참여 인원', style: TextStyle(fontSize: 13, color: textGrey)),
-                      Text('5명', style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: textDark)),
-                    ],
-                  ),
-                  const SizedBox(height: 12),
-                  const Divider(color: Color(0xFFF3F4F6)),
-                  const SizedBox(height: 8),
-                  Row(
-                    children: const [
-                      Icon(Icons.picture_as_pdf_rounded, color: primaryBlue, size: 18),
-                      SizedBox(width: 8),
-                      Text('BRIDGE 계약서.pdf', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: textDark)),
-                      Spacer(),
-                      Icon(Icons.chevron_right_rounded, color: textGrey, size: 18),
-                    ],
-                  ),
+                  if (contract?.pm.isNotEmpty == true) ...[
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        const Text('담당 PM', style: TextStyle(fontSize: 13, color: textGrey)),
+                        Text(contract!.pm, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: textDark)),
+                      ],
+                    ),
+                    const SizedBox(height: 10),
+                  ],
+                  if (contract?.participants != null) ...[
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        const Text('참여 인원', style: TextStyle(fontSize: 13, color: textGrey)),
+                        Text('${contract!.participants}명', style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: textDark)),
+                      ],
+                    ),
+                    const SizedBox(height: 10),
+                  ],
+                  if (receipt?.client.isNotEmpty == true) ...[
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        const Text('클라이언트', style: TextStyle(fontSize: 13, color: textGrey)),
+                        Text(receipt!.client, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: textDark)),
+                      ],
+                    ),
+                    const SizedBox(height: 10),
+                  ],
+                  if (!(contract?.pm.isNotEmpty == true) &&
+                      !(contract?.participants != null) &&
+                      !(receipt?.client.isNotEmpty == true))
+                    const Text(
+                      '추가 정보가 아직 없어요.',
+                      style: TextStyle(fontSize: 12, color: textGrey),
+                    ),
+                  if (contract?.fileName.isNotEmpty == true) ...[
+                    const SizedBox(height: 2),
+                    const Divider(color: Color(0xFFF3F4F6)),
+                    const SizedBox(height: 8),
+                    InkWell(
+                      onTap: () => _toast('준비 중이에요.'),
+                      child: Row(
+                        children: [
+                          const Icon(Icons.picture_as_pdf_rounded, color: primaryBlue, size: 18),
+                          const SizedBox(width: 8),
+                          Text(
+                            contract!.fileName,
+                            style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: textDark),
+                          ),
+                          const Spacer(),
+                          const Icon(Icons.chevron_right_rounded, color: textGrey, size: 18),
+                        ],
+                      ),
+                    ),
+                  ],
                 ],
               ),
             ),
@@ -228,24 +361,27 @@ class FinanceOrderDetailScreen extends StatelessWidget {
     );
   }
 
-  Widget _buildStepItem({required String title, required String subtitle, required bool isDone, bool isLast = false}) {
+  Widget _buildStepItem({required String title, required String subtitle, required bool isDone}) {
     return Row(
       children: [
         Container(
           width: 22,
           height: 22,
-          decoration: const BoxDecoration(
-            color: Color(0xFF2F80ED),
+          decoration: BoxDecoration(
+            color: isDone ? const Color(0xFF2F80ED) : const Color(0xFFE5E7EB),
             shape: BoxShape.circle,
           ),
-          child: const Icon(Icons.check_rounded, color: Colors.white, size: 14),
+          child: isDone
+              ? const Icon(Icons.check_rounded, color: Colors.white, size: 14)
+              : null,
         ),
         const SizedBox(width: 12),
         Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(title, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: Color(0xFF111827))),
-            Text(subtitle, style: const TextStyle(fontSize: 11, color: Color(0xFF8E8E93))),
+            if (subtitle.isNotEmpty)
+              Text(subtitle, style: const TextStyle(fontSize: 11, color: Color(0xFF8E8E93))),
           ],
         ),
       ],

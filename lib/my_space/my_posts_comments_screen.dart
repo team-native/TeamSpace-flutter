@@ -1,27 +1,19 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
+import 'package:intl/intl.dart';
+import 'package:teamspace/core/network/api_exception.dart';
+import 'package:teamspace/data/models/community_models.dart';
+import 'package:teamspace/data/models/my_space_models.dart';
+import 'package:teamspace/data/repositories/community_repository.dart';
+import 'package:teamspace/data/repositories/my_space_repository.dart';
+import 'package:teamspace/shared/widgets/state_views.dart';
 import '../app/router.dart';
 
-// 💡 Dart 3.0+ Record 기반 불변 데이터 타입 정의
-typedef MyPostItem = ({
-  String id,
-  String dateTime,
-  String authorInfo,
-  String tag,
-  String title,
-  String stats,
-  bool isAnonymous,
-});
-
-typedef MyCommentItem = ({
-  String id,
-  String content,
-  String postTitle,
-  String dateTime,
-  String stats,
-  bool isAnonymous,
-});
-
+/// 내 게시글 · 댓글
+/// - 글: GET /posts?mine=true  +  GET /posts?mine=true&status=draft (임시 저장)
+/// - 댓글: GET /me/activity 중 kind == 'comment' (서버에 '내 댓글' 전용 API가 없어요)
+/// - 댓글 수정 · 삭제: PATCH / DELETE /posts/{postId}/comments/{commentId}
+/// - 글 삭제: DELETE /posts/{id}
 class MyPostsCommentsScreen extends StatefulWidget {
   const MyPostsCommentsScreen({super.key});
 
@@ -30,80 +22,327 @@ class MyPostsCommentsScreen extends StatefulWidget {
 }
 
 class _MyPostsCommentsScreenState extends State<MyPostsCommentsScreen> {
-  int _selectedTabIndex = 0; // 0: 글 (3개), 1: 댓글 (4개)
+  static const _primaryBlue = Color(0xFF3182F6);
+  static const _textDark = Color(0xFF111827);
+  static final DateFormat _fullFmt = DateFormat('yyyy.MM.dd HH:mm');
+  static final DateFormat _shortFmt = DateFormat('MM.dd HH:mm');
 
-  // 게시글 샘플 데이터
-  static const List<MyPostItem> _posts = [
-    (
-      id: 'post_1',
-      dateTime: '2026.10.15 18:20',
-      authorInfo: '실명 옥물결',
-      tag: '실명',
-      title: '이번 주 함께 읽을 책 추천해요',
-      stats: '좋아요 8 · 댓글 3 · 조회 41',
-      isAnonymous: false,
-    ),
-    (
-      id: 'post_2',
-      dateTime: '2026.10.12 13:10',
-      authorInfo: '나만 보는 익명 기록',
-      tag: '익명',
-      title: '집중해서 일하는 시간, 어떻게 정하나요?',
-      stats: '좋아요 12 · 댓글 6 · 공개 표시: 익명',
-      isAnonymous: true,
-    ),
-    (
-      id: 'post_3',
-      dateTime: '2026.10.09 09:30',
-      authorInfo: '실명 옥물결',
-      tag: '실명',
-      title: '디자인 리뷰 자료 공유합니다!',
-      stats: '좋아요 5 · 댓글 2 · 첨부 1개',
-      isAnonymous: false,
-    ),
-  ];
+  /// 댓글을 모으려고 활동 목록을 최대 몇 페이지까지 볼지
+  static const int _maxActivityPages = 5;
 
-  // 댓글 샘플 데이터
-  static const List<MyCommentItem> _comments = [
-    (
-      id: 'comment_1',
-      content: '“예약 기준이 정리되면 좋겠어요.”',
-      postTitle: '회의실 이용 경험을 나눠주세요',
-      dateTime: '10.14 17:05',
-      stats: '좋아요 2 · 답글 1 · 공개 화면에는 익명으로 표시',
-      isAnonymous: true,
-    ),
-    (
-      id: 'comment_2',
-      content: '“자료 공유해 주셔서 감사합니다! 큰 도움 되었어요.”',
-      postTitle: 'Book-on QA 프로세스 공유',
-      dateTime: '10.11 11:20',
-      stats: '좋아요 4 · 답글 0',
-      isAnonymous: false,
-    ),
-    (
-      id: 'comment_3',
-      content: '“투입 일정 관련해서 쪽지 보냈습니다.”',
-      postTitle: '11월 디자인 인원 지원 요청',
-      dateTime: '10.08 14:15',
-      stats: '좋아요 1 · 답글 2',
-      isAnonymous: false,
-    ),
-    (
-      id: 'comment_4',
-      content: '“피드백 반영해서 수정안 업로드하겠습니다.”',
-      postTitle: '디자인 시스템 v2.0 공유',
-      dateTime: '10.05 16:40',
-      stats: '좋아요 3 · 답글 0',
-      isAnonymous: false,
-    ),
-  ];
+  int _selectedTabIndex = 0; // 0: 글, 1: 댓글
+
+  List<Post> _posts = [];
+  List<Post> _drafts = [];
+  List<ActivityItem> _comments = [];
+  bool _isLoading = true;
+  String? _errorMessage;
+  int _requestId = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  // ───────────────────────── 데이터 ─────────────────────────
+
+  Future<void> _load() async {
+    final requestId = ++_requestId;
+    setState(() {
+      _isLoading = _posts.isEmpty && _drafts.isEmpty && _comments.isEmpty;
+      _errorMessage = null;
+    });
+    try {
+      final results = await Future.wait<Object>([
+        CommunityRepository.instance.getPosts(mine: true, limit: 50),
+        CommunityRepository.instance.getPosts(mine: true, status: 'draft', limit: 50),
+        _loadMyComments(),
+      ]);
+      if (!mounted || requestId != _requestId) return;
+      setState(() {
+        _posts = (results[0] as PostPage).items;
+        _drafts = (results[1] as PostPage).items;
+        _comments = results[2] as List<ActivityItem>;
+        _isLoading = false;
+      });
+    } on ApiException catch (e) {
+      if (!mounted || requestId != _requestId) return;
+      setState(() {
+        _errorMessage = e.message;
+        _isLoading = false;
+      });
+    }
+  }
+
+  /// /me/activity 를 넘겨 가며 댓글만 모아요
+  Future<List<ActivityItem>> _loadMyComments() async {
+    final comments = <ActivityItem>[];
+    String? cursor;
+    for (var i = 0; i < _maxActivityPages; i++) {
+      final page = await MySpaceRepository.instance.getActivity(cursor: cursor, limit: 100);
+      comments.addAll(page.items.where((a) => a.kind == 'comment' && a.postId.isNotEmpty));
+      cursor = page.nextCursor;
+      if (cursor == null) break;
+    }
+    return comments;
+  }
+
+  void _toast(String message) {
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  /// 상세 화면에서 돌아오면 숫자가 바뀌었을 수 있어서 다시 불러와요
+  Future<void> _openPost(String postId) async {
+    await context.push(AppRoutes.postDetail, extra: postId);
+    if (mounted) _load();
+  }
+
+  // ───────────────────────── 글 동작 ─────────────────────────
+
+  Future<void> _showPostMenu(Post post) async {
+    final action = await showModalBottomSheet<String>(
+      context: context,
+      backgroundColor: Colors.white,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (context) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 12),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ListTile(
+                leading: const Icon(Icons.open_in_new_rounded, color: _textDark),
+                title: Text(post.isDraft ? '이어서 쓰기' : '상세 보기 · 수정'),
+                onTap: () => Navigator.pop(context, 'open'),
+              ),
+              ListTile(
+                leading: const Icon(Icons.delete_outline_rounded, color: Color(0xFFEF4444)),
+                title: const Text('삭제', style: TextStyle(color: Color(0xFFEF4444))),
+                onTap: () => Navigator.pop(context, 'delete'),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    if (!mounted || action == null) return;
+    if (action == 'open') return _openPost(post.id);
+    if (action == 'delete') return _deletePost(post);
+  }
+
+  Future<void> _deletePost(Post post) async {
+    final ok = await _confirm(
+      title: post.isDraft ? '임시 저장 글을 삭제할까요?' : '게시글을 삭제할까요?',
+      message: '삭제한 글과 달린 댓글은 되돌릴 수 없어요.',
+    );
+    if (!ok || !mounted) return;
+
+    // 낙관적 업데이트: 먼저 지우고, 실패하면 되돌려요
+    final prevPosts = _posts;
+    final prevDrafts = _drafts;
+    final prevComments = _comments;
+    setState(() {
+      _posts = _posts.where((p) => p.id != post.id).toList();
+      _drafts = _drafts.where((p) => p.id != post.id).toList();
+      _comments = _comments.where((c) => c.postId != post.id).toList();
+    });
+    try {
+      await CommunityRepository.instance.deletePost(post.id);
+      if (mounted) _toast('게시글을 삭제했어요.');
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _posts = prevPosts;
+        _drafts = prevDrafts;
+        _comments = prevComments;
+      });
+      _toast(e.isNotFound ? '이미 삭제된 글이에요.' : e.message);
+      if (e.isNotFound) _load();
+    }
+  }
+
+  // ───────────────────────── 댓글 동작 ─────────────────────────
+
+  Future<void> _showCommentMenu(ActivityItem comment) async {
+    final action = await showModalBottomSheet<String>(
+      context: context,
+      backgroundColor: Colors.white,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (context) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 12),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ListTile(
+                leading: const Icon(Icons.article_outlined, color: _textDark),
+                title: const Text('원글 보기'),
+                onTap: () => Navigator.pop(context, 'open'),
+              ),
+              ListTile(
+                leading: const Icon(Icons.edit_outlined, color: _textDark),
+                title: const Text('댓글 수정'),
+                onTap: () => Navigator.pop(context, 'edit'),
+              ),
+              ListTile(
+                leading: const Icon(Icons.delete_outline_rounded, color: Color(0xFFEF4444)),
+                title: const Text('댓글 삭제', style: TextStyle(color: Color(0xFFEF4444))),
+                onTap: () => Navigator.pop(context, 'delete'),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    if (!mounted || action == null) return;
+    switch (action) {
+      case 'open':
+        return _openPost(comment.postId);
+      case 'edit':
+        return _editComment(comment);
+      case 'delete':
+        return _deleteComment(comment);
+    }
+  }
+
+  Future<void> _editComment(ActivityItem comment) async {
+    final text = await _askText(
+      title: '댓글 수정',
+      initial: comment.title,
+      hint: '댓글 내용을 입력해 주세요',
+      maxLength: 500,
+    );
+    if (text == null || !mounted || text == comment.title) return;
+
+    try {
+      final saved = await CommunityRepository.instance.updateComment(comment.postId, comment.id, text);
+      if (!mounted) return;
+      setState(() {
+        _comments = [
+          for (final c in _comments)
+            if (c.id == comment.id)
+              ActivityItem.fromJson({...c.raw, 'title': saved})
+            else
+              c,
+        ];
+      });
+      _toast('댓글을 고쳤어요.');
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      _toast(e.isForbidden ? '내가 쓴 댓글만 고칠 수 있어요.' : e.message);
+      if (e.isNotFound) _load();
+    }
+  }
+
+  Future<void> _deleteComment(ActivityItem comment) async {
+    final ok = await _confirm(
+      title: '댓글을 삭제할까요?',
+      message: '삭제한 댓글은 되돌릴 수 없어요.',
+    );
+    if (!ok || !mounted) return;
+
+    final prev = _comments;
+    setState(() => _comments = _comments.where((c) => c.id != comment.id).toList());
+    try {
+      await CommunityRepository.instance.deleteComment(comment.postId, comment.id);
+      if (mounted) _toast('댓글을 삭제했어요.');
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      setState(() => _comments = prev);
+      _toast(e.isForbidden ? '내가 쓴 댓글만 삭제할 수 있어요.' : e.message);
+      if (e.isNotFound) _load();
+    }
+  }
+
+  // ───────────────────────── 공통 다이얼로그 ─────────────────────────
+
+  Future<bool> _confirm({required String title, required String message}) async {
+    final result = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: Colors.white,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: Text(title, style: const TextStyle(fontSize: 17, fontWeight: FontWeight.bold)),
+        content: Text(message, style: const TextStyle(fontSize: 14, color: Color(0xFF475569))),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('취소', style: TextStyle(color: Color(0xFF64748B))),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('삭제',
+                style: TextStyle(color: Color(0xFFEF4444), fontWeight: FontWeight.bold)),
+          ),
+        ],
+      ),
+    );
+    return result == true;
+  }
+
+  Future<String?> _askText({
+    required String title,
+    required String initial,
+    required String hint,
+    int? maxLength,
+  }) async {
+    final controller = TextEditingController(text: initial);
+    final result = await showDialog<String>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) {
+          final canSave = controller.text.trim().isNotEmpty;
+          return AlertDialog(
+            backgroundColor: Colors.white,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+            title: Text(title, style: const TextStyle(fontSize: 17, fontWeight: FontWeight.bold)),
+            content: TextField(
+              controller: controller,
+              autofocus: true,
+              minLines: 2,
+              maxLines: 5,
+              maxLength: maxLength,
+              onChanged: (_) => setDialogState(() {}),
+              decoration: InputDecoration(
+                hintText: hint,
+                filled: true,
+                fillColor: const Color(0xFFF8FAFC),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: BorderSide.none,
+                ),
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('취소', style: TextStyle(color: Color(0xFF64748B))),
+              ),
+              TextButton(
+                onPressed: canSave ? () => Navigator.pop(context, controller.text.trim()) : null,
+                child: const Text('저장', style: TextStyle(fontWeight: FontWeight.bold)),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+    controller.dispose();
+    return result;
+  }
+
+  // ───────────────────────── 화면 ─────────────────────────
 
   @override
   Widget build(BuildContext context) {
     const bgColor = Color(0xFFF8FAFC);
-    const primaryBlue = Color(0xFF3182F6);
-    const textDark = Color(0xFF111827);
 
     return Scaffold(
       backgroundColor: bgColor,
@@ -117,176 +356,214 @@ class _MyPostsCommentsScreenState extends State<MyPostsCommentsScreen> {
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
                   IconButton(
-                    icon: const Icon(Icons.chevron_left_rounded,
-                        size: 28, color: textDark),
+                    icon: const Icon(Icons.chevron_left_rounded, size: 28, color: _textDark),
                     onPressed: () => context.pop(),
                   ),
                   const Text(
                     '내 게시글·댓글',
-                    style: TextStyle(
-                      fontSize: 18,
-                      fontWeight: FontWeight.bold,
-                      color: textDark,
-                    ),
+                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: _textDark),
                   ),
                   IconButton(
-                    icon: const Icon(Icons.more_horiz_rounded,
-                        size: 24, color: textDark),
-                    onPressed: () {},
+                    tooltip: '새로고침',
+                    icon: const Icon(Icons.refresh_rounded, size: 24, color: _textDark),
+                    onPressed: _isLoading ? null : _load,
                   ),
                 ],
               ),
             ),
 
             // 2. 본문 영역
-            Expanded(
-              child: SingleChildScrollView(
-                padding:
-                const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    // 서브 헤더
-                    const Text(
-                      '내가 쓴 글을 한눈에 볼 수 있어요',
-                      style: TextStyle(
-                        fontSize: 13,
-                        fontWeight: FontWeight.bold,
-                        color: primaryBlue,
-                      ),
-                    ),
-                    const SizedBox(height: 6),
-                    const Text(
-                      '내가 남긴 이야기',
-                      style: TextStyle(
-                        fontSize: 22,
-                        fontWeight: FontWeight.w800,
-                        color: textDark,
-                        letterSpacing: -0.5,
-                      ),
-                    ),
-                    const SizedBox(height: 16),
-
-                    // 탭 버튼 칩 (글 3 / 댓글 4)
-                    Row(
-                      children: [
-                        _buildTabChip(
-                          label: '글 ${_posts.length}',
-                          isSelected: _selectedTabIndex == 0,
-                          onTap: () => setState(() => _selectedTabIndex = 0),
-                        ),
-                        const SizedBox(width: 8),
-                        _buildTabChip(
-                          label: '댓글 ${_comments.length}',
-                          isSelected: _selectedTabIndex == 1,
-                          onTap: () => setState(() => _selectedTabIndex = 1),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 16),
-
-                    // 안내 배너
-                    Container(
-                      width: double.infinity,
-                      padding: const EdgeInsets.all(16),
-                      decoration: BoxDecoration(
-                        color: const Color(0xFFF0F6FE),
-                        borderRadius: BorderRadius.circular(16),
-                      ),
-                      child: Row(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: const [
-                          Icon(
-                            Icons.info_outline_rounded,
-                            color: primaryBlue,
-                            size: 18,
-                          ),
-                          SizedBox(width: 10),
-                          Expanded(
-                            child: Text(
-                              '이 화면은 나만 볼 수 있어요. 공개 게시판에서는 숨겨진 내 익명 활동도 여기서는 본인이 확인할 수 있어요.',
-                              style: TextStyle(
-                                fontSize: 12,
-                                color: Color(0xFF475569),
-                                height: 1.45,
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                    const SizedBox(height: 20),
-
-                    // 3. 탭 선택에 따른 리스트 렌더링
-                    if (_selectedTabIndex == 0) ...[
-                      // 글 목록
-                      ListView.separated(
-                        shrinkWrap: true,
-                        physics: const NeverScrollableScrollPhysics(),
-                        itemCount: _posts.length,
-                        separatorBuilder: (_, __) => const SizedBox(height: 14),
-                        itemBuilder: (context, index) =>
-                            _buildPostCard(_posts[index]),
-                      ),
-                      const SizedBox(height: 20),
-
-                      // 최근 작성한 댓글 영역 (글 탭 하단 프리뷰)
-                      _buildRecentCommentPreviewCard(_comments.first),
-                    ] else ...[
-                      // 댓글 전체 목록
-                      ListView.separated(
-                        shrinkWrap: true,
-                        physics: const NeverScrollableScrollPhysics(),
-                        itemCount: _comments.length,
-                        separatorBuilder: (_, __) => const SizedBox(height: 14),
-                        itemBuilder: (context, index) =>
-                            _buildCommentCard(_comments[index]),
-                      ),
-                    ],
-
-                    const SizedBox(height: 24),
-
-                    // 하단 구조 설명 텍스트
-                    const Padding(
-                      padding: EdgeInsets.symmetric(horizontal: 4),
-                      child: Text(
-                        '글과 댓글의 실명·익명 여부는 각각 작성자가 선택해요. 익명 문의는 별도의 \'내 문의\'에서 확인해요.',
-                        style: TextStyle(
-                          fontSize: 11,
-                          color: Color(0xFF94A3B8),
-                          height: 1.45,
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: 30),
-                  ],
-                ),
-              ),
-            ),
+            Expanded(child: _buildBody()),
           ],
         ),
       ),
     );
   }
 
-  // 탭 선택 필터 칩 빌더
+  Widget _buildBody() {
+    if (_isLoading) {
+      return const Padding(
+        padding: EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+        child: SkeletonList(count: 4),
+      );
+    }
+    if (_errorMessage != null) {
+      return ErrorStateView(
+        title: '내 글을 불러오지 못했어요',
+        message: _errorMessage,
+        onRetry: _load,
+        onBack: () => context.pop(),
+      );
+    }
+
+    final postCount = _posts.length + _drafts.length;
+
+    return RefreshIndicator(
+      onRefresh: _load,
+      child: SingleChildScrollView(
+        physics: const AlwaysScrollableScrollPhysics(),
+        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              '내가 쓴 글을 한눈에 볼 수 있어요',
+              style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: _primaryBlue),
+            ),
+            const SizedBox(height: 6),
+            const Text(
+              '내가 남긴 이야기',
+              style: TextStyle(
+                fontSize: 22,
+                fontWeight: FontWeight.w800,
+                color: _textDark,
+                letterSpacing: -0.5,
+              ),
+            ),
+            const SizedBox(height: 16),
+
+            // 탭 버튼 칩
+            Row(
+              children: [
+                _buildTabChip(
+                  label: '글 $postCount',
+                  isSelected: _selectedTabIndex == 0,
+                  onTap: () => setState(() => _selectedTabIndex = 0),
+                ),
+                const SizedBox(width: 8),
+                _buildTabChip(
+                  label: '댓글 ${_comments.length}',
+                  isSelected: _selectedTabIndex == 1,
+                  onTap: () => setState(() => _selectedTabIndex = 1),
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+
+            // 안내 배너
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(
+                color: const Color(0xFFF0F6FE),
+                borderRadius: BorderRadius.circular(16),
+              ),
+              child: const Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Icon(Icons.info_outline_rounded, color: _primaryBlue, size: 18),
+                  SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      '이 화면은 나만 볼 수 있어요. 공개 게시판에서는 숨겨진 내 익명 활동도 여기서는 본인이 확인할 수 있어요.',
+                      style: TextStyle(fontSize: 12, color: Color(0xFF475569), height: 1.45),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 20),
+
+            // 3. 탭 선택에 따른 리스트
+            if (_selectedTabIndex == 0) ..._buildPostTab() else ..._buildCommentTab(),
+
+            const SizedBox(height: 24),
+
+            // 하단 설명
+            const Padding(
+              padding: EdgeInsets.symmetric(horizontal: 4),
+              child: Text(
+                '글과 댓글의 실명·익명 여부는 각각 작성자가 선택해요. 익명 문의는 별도의 \'내 문의\'에서 확인해요.',
+                style: TextStyle(fontSize: 11, color: Color(0xFF94A3B8), height: 1.45),
+              ),
+            ),
+            const SizedBox(height: 30),
+          ],
+        ),
+      ),
+    );
+  }
+
+  List<Widget> _buildPostTab() {
+    if (_posts.isEmpty && _drafts.isEmpty) {
+      return [
+        EmptyStateView(
+          icon: Icons.edit_note_rounded,
+          title: '아직 쓴 글이 없어요',
+          description: '팀 게시판에 첫 이야기를 남겨 보세요.',
+          primaryLabel: '게시판 가기',
+          onPrimary: () => context.push(AppRoutes.teamBoard),
+        ),
+        if (_comments.isNotEmpty) ...[
+          const SizedBox(height: 20),
+          _buildRecentCommentPreviewCard(_comments.first),
+        ],
+      ];
+    }
+    return [
+      if (_drafts.isNotEmpty) ...[
+        _sectionLabel('임시 저장 ${_drafts.length}'),
+        const SizedBox(height: 10),
+        for (final d in _drafts) ...[
+          _buildPostCard(d),
+          const SizedBox(height: 14),
+        ],
+        const SizedBox(height: 6),
+        _sectionLabel('올린 글 ${_posts.length}'),
+        const SizedBox(height: 10),
+      ],
+      for (var i = 0; i < _posts.length; i++) ...[
+        _buildPostCard(_posts[i]),
+        if (i != _posts.length - 1) const SizedBox(height: 14),
+      ],
+      if (_comments.isNotEmpty) ...[
+        const SizedBox(height: 20),
+        _buildRecentCommentPreviewCard(_comments.first),
+      ],
+    ];
+  }
+
+  List<Widget> _buildCommentTab() {
+    if (_comments.isEmpty) {
+      return const [
+        EmptyStateView(
+          icon: Icons.chat_bubble_outline_rounded,
+          title: '아직 남긴 댓글이 없어요',
+          description: '게시글에 댓글을 남기면 여기에서 모아 볼 수 있어요.',
+        ),
+      ];
+    }
+    return [
+      for (var i = 0; i < _comments.length; i++) ...[
+        _buildCommentCard(_comments[i]),
+        if (i != _comments.length - 1) const SizedBox(height: 14),
+      ],
+    ];
+  }
+
+  Widget _sectionLabel(String text) => Padding(
+    padding: const EdgeInsets.only(left: 4),
+    child: Text(
+      text,
+      style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: Color(0xFF64748B)),
+    ),
+  );
+
+  // 탭 선택 필터 칩
   Widget _buildTabChip({
     required String label,
     required bool isSelected,
     required VoidCallback onTap,
   }) {
-    const primaryBlue = Color(0xFF3182F6);
     return InkWell(
       onTap: onTap,
       borderRadius: BorderRadius.circular(20),
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
         decoration: BoxDecoration(
-          color: isSelected ? primaryBlue : Colors.white,
+          color: isSelected ? _primaryBlue : Colors.white,
           borderRadius: BorderRadius.circular(20),
-          border: Border.all(
-            color: isSelected ? primaryBlue : const Color(0xFFE2E8F0),
-          ),
+          border: Border.all(color: isSelected ? _primaryBlue : const Color(0xFFE2E8F0)),
         ),
         child: Text(
           label,
@@ -300,175 +577,153 @@ class _MyPostsCommentsScreenState extends State<MyPostsCommentsScreen> {
     );
   }
 
-  // 게시글 카드 빌더
-  Widget _buildPostCard(MyPostItem item) {
-    const primaryBlue = Color(0xFF3182F6);
-    const textDark = Color(0xFF111827);
+  Widget _tag(String text, {required Color bg, required Color fg}) => Container(
+    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+    decoration: BoxDecoration(color: bg, borderRadius: BorderRadius.circular(8)),
+    child: Text(text, style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: fg)),
+  );
 
-    final (tagBg, tagText) = item.isAnonymous
-        ? (const Color(0xFFF1F5F9), const Color(0xFF64748B))
-        : (const Color(0xFFE8F2FF), primaryBlue);
+  BoxDecoration get _cardDecoration => BoxDecoration(
+    color: Colors.white,
+    borderRadius: BorderRadius.circular(20),
+    boxShadow: const [
+      BoxShadow(color: Color.fromRGBO(0, 0, 0, 0.02), blurRadius: 8, offset: Offset(0, 2)),
+    ],
+  );
 
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(20),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(20),
-        boxShadow: const [
-          BoxShadow(
-            color: Color.fromRGBO(0, 0, 0, 0.02),
-            blurRadius: 8,
-            offset: Offset(0, 2),
-          ),
-        ],
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Text(
-                '${item.dateTime} · ${item.authorInfo}',
-                style: const TextStyle(
-                  fontSize: 12,
-                  color: Color(0xFF94A3B8),
-                ),
-              ),
-              Container(
-                padding:
-                const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                decoration: BoxDecoration(
-                  color: tagBg,
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: Text(
-                  item.tag,
-                  style: TextStyle(
-                    fontSize: 11,
-                    fontWeight: FontWeight.bold,
-                    color: tagText,
+  // 게시글 카드
+  Widget _buildPostCard(Post item) {
+    final date = item.createdAt == null ? '' : _fullFmt.format(item.createdAt!);
+    final authorInfo = item.anonymous
+        ? '나만 보는 익명 기록'
+        : (item.author.isEmpty ? '실명' : '실명 ${item.author}');
+
+    final stats = item.isDraft
+        ? '아직 공개되지 않은 글이에요'
+        : [
+      '좋아요 ${item.likes}',
+      '댓글 ${item.commentCount}',
+      item.anonymous ? '공개 표시: 익명' : '조회 ${item.views}',
+      if (item.attachmentCount > 0) '첨부 ${item.attachmentCount}개',
+    ].join(' · ');
+
+    return InkWell(
+      onTap: () => _openPost(item.id),
+      onLongPress: () => _showPostMenu(item),
+      borderRadius: BorderRadius.circular(20),
+      child: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.fromLTRB(20, 16, 12, 18),
+        decoration: _cardDecoration,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    [if (date.isNotEmpty) date, authorInfo].join(' · '),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(fontSize: 12, color: Color(0xFF94A3B8)),
                   ),
                 ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 10),
-          Text(
-            item.title,
-            style: const TextStyle(
-              fontSize: 16,
-              fontWeight: FontWeight.bold,
-              color: textDark,
-            ),
-          ),
-          const SizedBox(height: 8),
-          Text(
-            item.stats,
-            style: const TextStyle(
-              fontSize: 12,
-              color: Color(0xFF64748B),
-            ),
-          ),
-          const SizedBox(height: 14),
-          InkWell(
-            onTap: () => context.push(AppRoutes.teamBoard),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: const [
-                Text(
-                  '상세 보기 · 수정',
-                  style: TextStyle(
-                    fontSize: 13,
-                    fontWeight: FontWeight.bold,
-                    color: primaryBlue,
+                const SizedBox(width: 8),
+                if (item.isDraft)
+                  _tag('임시 저장', bg: const Color(0xFFFFF7ED), fg: const Color(0xFFF97316))
+                else if (item.anonymous)
+                  _tag('익명', bg: const Color(0xFFF1F5F9), fg: const Color(0xFF64748B))
+                else
+                  _tag('실명', bg: const Color(0xFFE8F2FF), fg: _primaryBlue),
+                SizedBox(
+                  width: 32,
+                  height: 32,
+                  child: IconButton(
+                    padding: EdgeInsets.zero,
+                    tooltip: '더 보기',
+                    icon: const Icon(Icons.more_vert_rounded, size: 18, color: Color(0xFF94A3B8)),
+                    onPressed: () => _showPostMenu(item),
                   ),
-                ),
-                SizedBox(width: 4),
-                Icon(
-                  Icons.chevron_right_rounded,
-                  color: primaryBlue,
-                  size: 16,
                 ),
               ],
             ),
-          ),
-        ],
+            const SizedBox(height: 8),
+            Padding(
+              padding: const EdgeInsets.only(right: 8),
+              child: Text(
+                item.title.isEmpty ? '(제목 없음)' : item.title,
+                style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: _textDark),
+              ),
+            ),
+            if (item.category.isNotEmpty) ...[
+              const SizedBox(height: 4),
+              Text(item.category, style: const TextStyle(fontSize: 12, color: Color(0xFF94A3B8))),
+            ],
+            const SizedBox(height: 8),
+            Text(stats, style: const TextStyle(fontSize: 12, color: Color(0xFF64748B))),
+            const SizedBox(height: 14),
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  item.isDraft ? '이어서 쓰기' : '상세 보기 · 수정',
+                  style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: _primaryBlue),
+                ),
+                const SizedBox(width: 4),
+                const Icon(Icons.chevron_right_rounded, color: _primaryBlue, size: 16),
+              ],
+            ),
+          ],
+        ),
       ),
     );
   }
 
-  // 최근 작성한 댓글 프리뷰 카드 빌더
-  Widget _buildRecentCommentPreviewCard(MyCommentItem comment) {
-    const textDark = Color(0xFF111827);
+  String _commentStats(ActivityItem c) {
+    final likes = c.raw['likes'];
+    final replies = c.raw['replyCount'];
+    final total = c.raw['commentCount'];
+    return [
+      if (likes != null) '원글 좋아요 $likes',
+      if (total != null) '원글 댓글 $total',
+      if (replies != null && '$replies' != '0') '답글 $replies',
+    ].join(' · ');
+  }
+
+  // 글 탭 하단: 최근 작성한 댓글 미리보기
+  Widget _buildRecentCommentPreviewCard(ActivityItem comment) {
+    final date = comment.createdAt == null ? '' : _shortFmt.format(comment.createdAt!);
+    final stats = _commentStats(comment);
 
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.all(20),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(24),
-        boxShadow: const [
-          BoxShadow(
-            color: Color.fromRGBO(0, 0, 0, 0.02),
-            blurRadius: 10,
-            offset: Offset(0, 2),
-          ),
-        ],
-      ),
+      decoration: _cardDecoration.copyWith(borderRadius: BorderRadius.circular(24)),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           const Text(
             '최근 작성한 댓글',
-            style: TextStyle(
-              fontSize: 16,
-              fontWeight: FontWeight.bold,
-              color: textDark,
-            ),
+            style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: _textDark),
           ),
           const SizedBox(height: 10),
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-            decoration: BoxDecoration(
-              color: const Color(0xFFF1F5F9),
-              borderRadius: BorderRadius.circular(8),
-            ),
-            child: const Text(
-              '익명 댓글 · 내 기록',
-              style: TextStyle(
-                fontSize: 11,
-                fontWeight: FontWeight.bold,
-                color: Color(0xFF64748B),
-              ),
-            ),
-          ),
+          _tag('내 기록', bg: const Color(0xFFF1F5F9), fg: const Color(0xFF64748B)),
           const SizedBox(height: 12),
           Text(
-            comment.content,
-            style: const TextStyle(
-              fontSize: 15,
-              fontWeight: FontWeight.bold,
-              color: textDark,
-            ),
+            '“${comment.title}”',
+            maxLines: 3,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(fontSize: 15, fontWeight: FontWeight.bold, color: _textDark),
           ),
           const SizedBox(height: 6),
           Text(
-            '${comment.postTitle} · ${comment.dateTime}',
-            style: const TextStyle(
-              fontSize: 12,
-              color: Color(0xFF94A3B8),
-            ),
+            [if (comment.postTitle.isNotEmpty) comment.postTitle, if (date.isNotEmpty) date].join(' · '),
+            style: const TextStyle(fontSize: 12, color: Color(0xFF94A3B8)),
           ),
-          const SizedBox(height: 4),
-          Text(
-            comment.stats,
-            style: const TextStyle(
-              fontSize: 11,
-              color: Color(0xFF64748B),
-            ),
-          ),
+          if (stats.isNotEmpty) ...[
+            const SizedBox(height: 4),
+            Text(stats, style: const TextStyle(fontSize: 11, color: Color(0xFF64748B))),
+          ],
           const SizedBox(height: 16),
           SizedBox(
             width: double.infinity,
@@ -478,17 +733,11 @@ class _MyPostsCommentsScreenState extends State<MyPostsCommentsScreen> {
               style: ElevatedButton.styleFrom(
                 backgroundColor: const Color(0xFFF1F5F9),
                 elevation: 0,
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(14),
-                ),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
               ),
               child: const Text(
                 '댓글 탭에서 확인 · 수정',
-                style: TextStyle(
-                  fontSize: 14,
-                  fontWeight: FontWeight.bold,
-                  color: Color(0xFF475569),
-                ),
+                style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: Color(0xFF475569)),
               ),
             ),
           ),
@@ -497,85 +746,58 @@ class _MyPostsCommentsScreenState extends State<MyPostsCommentsScreen> {
     );
   }
 
-  // 댓글 목록 전용 카드 빌더
-  Widget _buildCommentCard(MyCommentItem item) {
-    const textDark = Color(0xFF111827);
+  // 댓글 카드
+  Widget _buildCommentCard(ActivityItem item) {
+    final date = item.createdAt == null ? '' : _shortFmt.format(item.createdAt!);
+    final stats = _commentStats(item);
 
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(20),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(20),
-        boxShadow: const [
-          BoxShadow(
-            color: Color.fromRGBO(0, 0, 0, 0.02),
-            blurRadius: 8,
-            offset: Offset(0, 2),
-          ),
-        ],
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Text(
-                item.dateTime,
-                style: const TextStyle(
-                  fontSize: 12,
-                  color: Color(0xFF94A3B8),
+    return InkWell(
+      onTap: () => _openPost(item.postId),
+      onLongPress: () => _showCommentMenu(item),
+      borderRadius: BorderRadius.circular(20),
+      child: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.fromLTRB(20, 14, 12, 18),
+        decoration: _cardDecoration,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: Text(date, style: const TextStyle(fontSize: 12, color: Color(0xFF94A3B8))),
                 ),
-              ),
-              Container(
-                padding:
-                const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                decoration: BoxDecoration(
-                  color: item.isAnonymous
-                      ? const Color(0xFFF1F5F9)
-                      : const Color(0xFFE8F2FF),
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: Text(
-                  item.isAnonymous ? '익명' : '실명',
-                  style: TextStyle(
-                    fontSize: 11,
-                    fontWeight: FontWeight.bold,
-                    color: item.isAnonymous
-                        ? const Color(0xFF64748B)
-                        : const Color(0xFF3182F6),
+                SizedBox(
+                  width: 32,
+                  height: 32,
+                  child: IconButton(
+                    padding: EdgeInsets.zero,
+                    tooltip: '더 보기',
+                    icon: const Icon(Icons.more_vert_rounded, size: 18, color: Color(0xFF94A3B8)),
+                    onPressed: () => _showCommentMenu(item),
                   ),
                 ),
+              ],
+            ),
+            const SizedBox(height: 4),
+            Padding(
+              padding: const EdgeInsets.only(right: 8),
+              child: Text(
+                '“${item.title}”',
+                style: const TextStyle(fontSize: 15, fontWeight: FontWeight.bold, color: _textDark),
               ),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              '원글: ${item.postTitle.isEmpty ? '삭제되었거나 볼 수 없는 글' : item.postTitle}',
+              style: const TextStyle(fontSize: 12, color: Color(0xFF64748B)),
+            ),
+            if (stats.isNotEmpty) ...[
+              const SizedBox(height: 4),
+              Text(stats, style: const TextStyle(fontSize: 11, color: Color(0xFF94A3B8))),
             ],
-          ),
-          const SizedBox(height: 8),
-          Text(
-            item.content,
-            style: const TextStyle(
-              fontSize: 15,
-              fontWeight: FontWeight.bold,
-              color: textDark,
-            ),
-          ),
-          const SizedBox(height: 6),
-          Text(
-            '원글: ${item.postTitle}',
-            style: const TextStyle(
-              fontSize: 12,
-              color: Color(0xFF64748B),
-            ),
-          ),
-          const SizedBox(height: 4),
-          Text(
-            item.stats,
-            style: const TextStyle(
-              fontSize: 11,
-              color: Color(0xFF94A3B8),
-            ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }

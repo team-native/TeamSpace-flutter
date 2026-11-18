@@ -1,7 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
+import 'package:teamspace/core/network/api_exception.dart';
+import 'package:teamspace/data/repositories/community_repository.dart';
 import '../app/router.dart';
 
+/// 문의 작성
+/// - POST /inquiries { type, dept, title, body, anonymous }
+/// - type 은 서버가 문의 · 건의 · 불편 신고 중 하나를 요구해요. 이 화면에는 유형을 고르는 UI가 없어서 '문의'로 보내요.
+/// - dept 는 자유 문자열이라 아래 4개 버튼(Leader · NativeOps · PMO · FA) 그대로 보낼 수 있어요.
 class InquiryCreateScreen extends StatefulWidget {
   const InquiryCreateScreen({super.key});
 
@@ -12,6 +18,7 @@ class InquiryCreateScreen extends StatefulWidget {
 class _InquiryCreateScreenState extends State<InquiryCreateScreen> {
   String _selectedTarget = 'NativeOps'; // Leader, NativeOps, PMO, FA
   bool _isAnonymous = true; // 실명 / 익명
+  bool _isSubmitting = false;
 
   late TextEditingController _titleController;
   late TextEditingController _contentController;
@@ -35,6 +42,39 @@ class _InquiryCreateScreenState extends State<InquiryCreateScreen> {
     _titleController.dispose();
     _contentController.dispose();
     super.dispose();
+  }
+
+  void _toast(String message) {
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  Future<void> _submit() async {
+    final title = _titleController.text.trim();
+    final content = _contentController.text.trim();
+    if (title.isEmpty || content.isEmpty) {
+      _toast('제목과 내용을 모두 입력해 주세요.');
+      return;
+    }
+    if (_isSubmitting) return;
+    setState(() => _isSubmitting = true);
+    try {
+      await CommunityRepository.instance.createInquiry(
+        type: '문의',
+        dept: _selectedTarget,
+        title: title,
+        body: content,
+        anonymous: _isAnonymous,
+      );
+      if (!mounted) return;
+      setState(() => _isSubmitting = false);
+      _showInquirySubmittedDialog(context);
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      setState(() => _isSubmitting = false);
+      _toast(e.message);
+    }
   }
 
   // 💡 피그마 11-3 문의 제출 완료 (iOS Alert) 팝업 모달
@@ -340,6 +380,7 @@ class _InquiryCreateScreenState extends State<InquiryCreateScreen> {
                       ),
                       child: TextField(
                         controller: _titleController,
+                        enabled: !_isSubmitting,
                         style: const TextStyle(
                           fontSize: 15,
                           fontWeight: FontWeight.bold,
@@ -376,6 +417,7 @@ class _InquiryCreateScreenState extends State<InquiryCreateScreen> {
                       ),
                       child: TextField(
                         controller: _contentController,
+                        enabled: !_isSubmitting,
                         maxLines: 7,
                         minLines: 5,
                         style: const TextStyle(
@@ -416,7 +458,7 @@ class _InquiryCreateScreenState extends State<InquiryCreateScreen> {
                         children: [
                           Expanded(
                             child: GestureDetector(
-                              onTap: () => setState(() => _isAnonymous = false),
+                              onTap: _isSubmitting ? null : () => setState(() => _isAnonymous = false),
                               child: Container(
                                 decoration: BoxDecoration(
                                   color: !_isAnonymous ? Colors.white : Colors.transparent,
@@ -455,7 +497,7 @@ class _InquiryCreateScreenState extends State<InquiryCreateScreen> {
                           ),
                           Expanded(
                             child: GestureDetector(
-                              onTap: () => setState(() => _isAnonymous = true),
+                              onTap: _isSubmitting ? null : () => setState(() => _isAnonymous = true),
                               child: Container(
                                 decoration: BoxDecoration(
                                   color: _isAnonymous ? Colors.white : Colors.transparent,
@@ -521,20 +563,27 @@ class _InquiryCreateScreenState extends State<InquiryCreateScreen> {
                     ),
                     const SizedBox(height: 28),
 
-                    // 💡 [수정 반영] 문의 제출 버튼 클릭 시 iOS Alert 팝업 모달 호출
+                    // 💡 문의 제출 버튼 — POST /inquiries 호출 후 완료 팝업
                     SizedBox(
                       width: double.infinity,
                       height: 52,
                       child: ElevatedButton(
-                        onPressed: () => _showInquirySubmittedDialog(context),
+                        onPressed: _isSubmitting ? null : _submit,
                         style: ElevatedButton.styleFrom(
                           backgroundColor: primaryBlue,
+                          disabledBackgroundColor: primaryBlue,
                           elevation: 0,
                           shape: RoundedRectangleBorder(
                             borderRadius: BorderRadius.circular(16),
                           ),
                         ),
-                        child: Text(
+                        child: _isSubmitting
+                            ? const SizedBox(
+                          width: 20,
+                          height: 20,
+                          child: CircularProgressIndicator(strokeWidth: 2.2, color: Colors.white),
+                        )
+                            : Text(
                           _isAnonymous ? '익명으로 문의 제출' : '실명으로 문의 제출',
                           style: const TextStyle(
                             fontSize: 15,
@@ -561,7 +610,7 @@ class _InquiryCreateScreenState extends State<InquiryCreateScreen> {
     final isSelected = _selectedTarget == label;
 
     return InkWell(
-      onTap: () => setState(() => _selectedTarget = label),
+      onTap: _isSubmitting ? null : () => setState(() => _selectedTarget = label),
       borderRadius: BorderRadius.circular(16),
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 150),

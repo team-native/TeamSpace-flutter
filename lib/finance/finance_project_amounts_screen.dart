@@ -2,6 +2,10 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import '../app/router.dart';
 import '../shared/widgets/custom_bottom_nav_bar.dart';
+import 'package:teamspace/core/network/api_exception.dart';
+import 'package:teamspace/data/models/finance_models.dart';
+import 'package:teamspace/data/repositories/finance_repository.dart';
+import 'package:teamspace/shared/widgets/state_views.dart';
 
 class FinanceProjectAmountsScreen extends StatefulWidget {
   const FinanceProjectAmountsScreen({super.key});
@@ -13,20 +17,129 @@ class FinanceProjectAmountsScreen extends StatefulWidget {
 
 class _FinanceProjectAmountsScreenState
     extends State<FinanceProjectAmountsScreen> {
+  static const Color _bgColor = Color(0xFFF6F7F9);
+  static const Color _primaryBlue = Color(0xFF2F80ED);
+  static const Color _textDark = Color(0xFF111827);
+  static const Color _textGrey = Color(0xFF6B7280);
+  static const Color _greenColor = Color(0xFF16A34A);
+  static const Color _cardBorderColor = Color(0x1A000000);
+
+  static const int _pageSize = 10;
+
   int _selectedFilterIndex = 0; // 0: 전체, 1: 진행 중, 2: 완료
+
+  FinanceDashboard? _dashboard;
+  List<FinanceProject> _projects = [];
+  int _page = 1;
+  bool _hasMore = false;
+
+  bool _isLoading = true;
+  bool _isLoadingMore = false;
+  String? _errorMessage;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  // ───────────── 서버 통신 ─────────────
+
+  Future<void> _load() async {
+    setState(() {
+      _isLoading = true;
+      _errorMessage = null;
+    });
+
+    try {
+      final dashboardFuture = FinanceRepository.instance.getDashboard();
+      final projectsFuture =
+      FinanceRepository.instance.getProjects(page: 1, limit: _pageSize);
+      await Future.wait([dashboardFuture, projectsFuture]);
+
+      final dashboard = await dashboardFuture;
+      final projects = await projectsFuture;
+      if (!mounted) return;
+
+      hasFinancePermission = true;
+      setState(() {
+        _dashboard = dashboard;
+        _projects = projects;
+        _page = 1;
+        _hasMore = projects.length >= _pageSize;
+        _isLoading = false;
+      });
+    } on ApiException catch (e) {
+      if (!mounted) return;
+
+      // 재정 권한이 없으면(403) 권한 없음 화면으로 보내요
+      if (e.statusCode == 403) {
+        hasFinancePermission = false;
+        context.pushReplacement(AppRoutes.financeNoPermission);
+        return;
+      }
+
+      setState(() {
+        _errorMessage = e.message;
+        _isLoading = false;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _errorMessage = '재정 정보를 불러오지 못했어요.';
+        _isLoading = false;
+      });
+    }
+  }
+
+  Future<void> _loadMore() async {
+    if (_isLoadingMore) return;
+    setState(() => _isLoadingMore = true);
+
+    try {
+      final next = await FinanceRepository.instance
+          .getProjects(page: _page + 1, limit: _pageSize);
+      if (!mounted) return;
+      setState(() {
+        _projects = [..._projects, ...next];
+        _page += 1;
+        _hasMore = next.length >= _pageSize;
+        _isLoadingMore = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _isLoadingMore = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(e is ApiException ? e.message : '더 불러오지 못했어요.'),
+        ),
+      );
+    }
+  }
+
+  // ───────────── 표시 헬퍼 ─────────────
+
+  /// 1234567 -> 1,234,567
+  String _number(int value) {
+    final digits = value.abs().toString();
+    final buffer = StringBuffer();
+    for (int i = 0; i < digits.length; i++) {
+      if (i > 0 && (digits.length - i) % 3 == 0) buffer.write(',');
+      buffer.write(digits[i]);
+    }
+    return '${value < 0 ? '-' : ''}$buffer';
+  }
+
+  String _won(int value) => '${_number(value)}원';
+
+  // ───────────── 화면 ─────────────
 
   @override
   Widget build(BuildContext context) {
-    const bgColor = Color(0xFFF6F7F9);
-    const textDark = Color(0xFF111827);
-    const textGrey = Color(0xFF6B7280);
-    const greenColor = Color(0xFF16A34A);
-    const cardBorderColor = Color(0x1A000000);
-
     return Scaffold(
-      backgroundColor: bgColor,
+      backgroundColor: _bgColor,
       appBar: AppBar(
-        backgroundColor: bgColor,
+        backgroundColor: _bgColor,
         elevation: 0,
         scrolledUnderElevation: 0,
         centerTitle: true,
@@ -48,7 +161,7 @@ class _FinanceProjectAmountsScreenState
               ),
               child: const Icon(
                 Icons.chevron_left_rounded,
-                color: textDark,
+                color: _textDark,
                 size: 24,
               ),
             ),
@@ -59,200 +172,197 @@ class _FinanceProjectAmountsScreenState
           style: TextStyle(
             fontSize: 16,
             fontWeight: FontWeight.bold,
-            color: textDark,
+            color: _textDark,
           ),
         ),
       ),
-      body: SingleChildScrollView(
+      body: _buildBody(),
+      bottomNavigationBar: const CustomBottomNavBar(currentIndex: 1),
+    );
+  }
+
+  Widget _buildBody() {
+    if (_isLoading) {
+      return const SingleChildScrollView(
+        padding: EdgeInsets.all(20),
+        child: SkeletonList(count: 4),
+      );
+    }
+
+    if (_errorMessage != null) {
+      return SingleChildScrollView(
         padding: const EdgeInsets.all(20),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            // 1. 누적 수주 금액 요약 상단 카드
-            Container(
-              width: double.infinity,
-              padding: const EdgeInsets.all(24),
-              decoration: BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.circular(24),
-                border: Border.all(color: cardBorderColor, width: 1),
+        child: ErrorStateView(
+          title: '재정 정보를 불러오지 못했어요',
+          message: _errorMessage,
+          onRetry: _load,
+          onBack: () {
+            if (context.canPop()) {
+              context.pop();
+            } else {
+              context.go(AppRoutes.home);
+            }
+          },
+        ),
+      );
+    }
+
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(20),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _buildSummaryCard(),
+          const SizedBox(height: 20),
+
+          // 필터 (전체 / 진행 중 / 완료)
+          Row(
+            children: [
+              _buildFilterChip(0, '전체'),
+              const SizedBox(width: 8),
+              _buildFilterChip(1, '진행 중'),
+              const SizedBox(width: 8),
+              _buildFilterChip(2, '완료'),
+            ],
+          ),
+          const SizedBox(height: 16),
+
+          ..._buildProjectCards(),
+
+          if (_hasMore) ...[
+            const SizedBox(height: 4),
+            _buildLoadMoreButton(),
+          ],
+          const SizedBox(height: 16),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSummaryCard() {
+    final dashboard = _dashboard;
+    final totalOrder = dashboard?.totalOrderAmount ?? 0;
+    final totalDeposit = dashboard?.totalDepositAmount ?? 0;
+    final unpaid = totalOrder - totalDeposit < 0 ? 0 : totalOrder - totalDeposit;
+    final ratio = totalOrder <= 0
+        ? 0.0
+        : (totalDeposit / totalOrder).clamp(0.0, 1.0).toDouble();
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(24),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(24),
+        border: Border.all(color: _cardBorderColor, width: 1),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            '누적 수주 금액',
+            style: TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w500,
+              color: _textGrey,
+            ),
+          ),
+          const SizedBox(height: 8),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.baseline,
+            textBaseline: TextBaseline.alphabetic,
+            children: [
+              Text(
+                _number(totalOrder),
+                style: const TextStyle(
+                  fontSize: 26,
+                  fontWeight: FontWeight.w800,
+                  color: _textDark,
+                  letterSpacing: -0.5,
+                ),
               ),
-              child: Column(
+              const SizedBox(width: 4),
+              const Text(
+                '원',
+                style: TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.bold,
+                  color: _textDark,
+                ),
+              ),
+              const SizedBox(width: 10),
+              Text(
+                '${_projects.length}건${_hasMore ? '+' : ''}',
+                style: const TextStyle(fontSize: 12, color: _textGrey),
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
+          ClipRRect(
+            borderRadius: BorderRadius.circular(4),
+            child: LinearProgressIndicator(
+              value: ratio,
+              minHeight: 8,
+              backgroundColor: const Color(0xFFF3F4F6),
+              valueColor: const AlwaysStoppedAnimation<Color>(_greenColor),
+            ),
+          ),
+          const SizedBox(height: 16),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   const Text(
-                    '누적 수주 금액',
-                    style: TextStyle(
-                      fontSize: 12,
-                      fontWeight: FontWeight.w500,
-                      color: textGrey,
+                    '누적 입금',
+                    style: TextStyle(fontSize: 11, color: _textGrey),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    _won(totalDeposit),
+                    style: const TextStyle(
+                      fontSize: 15,
+                      fontWeight: FontWeight.bold,
+                      color: _greenColor,
                     ),
-                  ),
-                  const SizedBox(height: 8),
-                  Row(
-                    crossAxisAlignment: CrossAxisAlignment.baseline,
-                    textBaseline: TextBaseline.alphabetic,
-                    children: const [
-                      Text(
-                        '28,400,000',
-                        style: TextStyle(
-                          fontSize: 26,
-                          fontWeight: FontWeight.w800,
-                          color: textDark,
-                          letterSpacing: -0.5,
-                        ),
-                      ),
-                      SizedBox(width: 4),
-                      Text(
-                        '원',
-                        style: TextStyle(
-                          fontSize: 16,
-                          fontWeight: FontWeight.bold,
-                          color: textDark,
-                        ),
-                      ),
-                      SizedBox(width: 10),
-                      Text(
-                        '올해 9건',
-                        style: TextStyle(
-                          fontSize: 12,
-                          color: textGrey,
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 16),
-
-                  // 누적 입금비율 프로그레스 바 (19,860,000원 / 28,400,000원 ≈ 70%)
-                  ClipRRect(
-                    borderRadius: BorderRadius.circular(4),
-                    child: LinearProgressIndicator(
-                      value: 19860000 / 28400000,
-                      minHeight: 8,
-                      backgroundColor: const Color(0xFFF3F4F6),
-                      valueColor: const AlwaysStoppedAnimation<Color>(greenColor),
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: const [
-                          Text(
-                            '누적 입금',
-                            style: TextStyle(fontSize: 11, color: textGrey),
-                          ),
-                          SizedBox(height: 4),
-                          Text(
-                            '19,860,000원',
-                            style: TextStyle(
-                              fontSize: 15,
-                              fontWeight: FontWeight.bold,
-                              color: greenColor,
-                            ),
-                          ),
-                        ],
-                      ),
-                      Column(
-                        crossAxisAlignment: CrossAxisAlignment.end,
-                        children: const [
-                          Text(
-                            '미수금',
-                            style: TextStyle(fontSize: 11, color: textGrey),
-                          ),
-                          SizedBox(height: 4),
-                          Text(
-                            '8,540,000원',
-                            style: TextStyle(
-                              fontSize: 15,
-                              fontWeight: FontWeight.bold,
-                              color: textDark,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ],
                   ),
                 ],
               ),
-            ),
-            const SizedBox(height: 20),
-
-            // 2. 필터 세그먼트 (전체 / 진행 중 / 완료)
-            Row(
-              children: [
-                _buildFilterChip(0, '전체'),
-                const SizedBox(width: 8),
-                _buildFilterChip(1, '진행 중'),
-                const SizedBox(width: 8),
-                _buildFilterChip(2, '완료'),
-              ],
-            ),
-            const SizedBox(height: 16),
-
-            // 3. 프로젝트별 리스트
-            ..._buildProjectCards(),
-
-            const SizedBox(height: 4),
-
-            // 4. 하단 추가 프로젝트 더보기 버튼
-            Container(
-              width: double.infinity,
-              height: 52,
-              decoration: BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.circular(16),
-                border: Border.all(color: cardBorderColor, width: 1),
-              ),
-              child: InkWell(
-                onTap: () {},
-                borderRadius: BorderRadius.circular(16),
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 20),
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: const [
-                      Text(
-                        '외 5개 프로젝트 보기',
-                        style: TextStyle(
-                          fontSize: 14,
-                          fontWeight: FontWeight.bold,
-                          color: textDark,
-                        ),
-                      ),
-                      Icon(
-                        Icons.chevron_right_rounded,
-                        color: textGrey,
-                        size: 20,
-                      ),
-                    ],
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  const Text(
+                    '미수금',
+                    style: TextStyle(fontSize: 11, color: _textGrey),
                   ),
-                ),
+                  const SizedBox(height: 4),
+                  Text(
+                    _won(unpaid),
+                    style: const TextStyle(
+                      fontSize: 15,
+                      fontWeight: FontWeight.bold,
+                      color: _textDark,
+                    ),
+                  ),
+                ],
               ),
-            ),
-            const SizedBox(height: 16),
-          ],
-        ),
+            ],
+          ),
+        ],
       ),
-      bottomNavigationBar: const CustomBottomNavBar(currentIndex: 1),
     );
   }
 
   Widget _buildFilterChip(int index, String label) {
     final isSelected = _selectedFilterIndex == index;
     return GestureDetector(
-      onTap: () {
-        setState(() {
-          _selectedFilterIndex = index;
-        });
-      },
+      onTap: () => setState(() => _selectedFilterIndex = index),
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 150),
         padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
         decoration: BoxDecoration(
-          color: isSelected ? const Color(0xFF111827) : Colors.white,
+          color: isSelected ? _textDark : Colors.white,
           borderRadius: BorderRadius.circular(24),
           border: isSelected
               ? null
@@ -263,7 +373,7 @@ class _FinanceProjectAmountsScreenState
           style: TextStyle(
             fontSize: 13,
             fontWeight: FontWeight.bold,
-            color: isSelected ? Colors.white : const Color(0xFF6B7280),
+            color: isSelected ? Colors.white : _textGrey,
           ),
         ),
       ),
@@ -271,65 +381,77 @@ class _FinanceProjectAmountsScreenState
   }
 
   List<Widget> _buildProjectCards() {
-    final projects = [
-      _ProjectData(
-        title: '예약 서비스 앱 UI 제작',
-        status: '진행 중',
-        isCompleted: false,
-        totalAmount: '4,200,000원',
-        collectedAmount: '2,100,000원',
-        collectedRate: '50%',
-        unpaidText: '미수금 2,100,000원',
-        progress: 0.5,
-      ),
-      _ProjectData(
-        title: '학과 행사 웹페이지',
-        status: '진행 중',
-        isCompleted: false,
-        totalAmount: '1,600,000원',
-        collectedAmount: '800,000원',
-        collectedRate: '50%',
-        unpaidText: '미수금 800,000원',
-        progress: 0.5,
-      ),
-      _ProjectData(
-        title: '모바일 앱 유지보수',
-        status: '진행 중',
-        isCompleted: false,
-        totalAmount: '5,400,000원',
-        collectedAmount: '2,700,000원',
-        collectedRate: '50%',
-        unpaidText: '미수금 2,700,000원',
-        progress: 0.5,
-      ),
-      _ProjectData(
-        title: '브랜드 소개 랜딩페이지',
-        status: '완료',
-        isCompleted: true,
-        totalAmount: '8,720,000원',
-        collectedAmount: '8,720,000원',
-        collectedRate: '100%',
-        unpaidText: '미수금 없음',
-        progress: 1.0,
-      ),
-    ];
-
-    final filtered = projects.where((p) {
+    final filtered = _projects.where((p) {
       if (_selectedFilterIndex == 1) return !p.isCompleted;
       if (_selectedFilterIndex == 2) return p.isCompleted;
       return true;
     }).toList();
 
-    return filtered.map((p) => _buildProjectItem(p)).toList();
+    if (filtered.isEmpty) {
+      return const [
+        Padding(
+          padding: EdgeInsets.symmetric(vertical: 40),
+          child: Center(
+            child: Text(
+              '표시할 프로젝트가 없어요.',
+              style: TextStyle(fontSize: 13, color: _textGrey),
+            ),
+          ),
+        ),
+      ];
+    }
+
+    return filtered.map(_buildProjectItem).toList();
   }
 
-  Widget _buildProjectItem(_ProjectData data) {
-    const primaryBlue = Color(0xFF2F80ED);
-    const greenColor = Color(0xFF16A34A);
-    const textDark = Color(0xFF111827);
-    const textGrey = Color(0xFF6B7280);
+  Widget _buildLoadMoreButton() {
+    return Container(
+      width: double.infinity,
+      height: 52,
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: _cardBorderColor, width: 1),
+      ),
+      child: InkWell(
+        onTap: _isLoadingMore ? null : _loadMore,
+        borderRadius: BorderRadius.circular(16),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 20),
+          child: _isLoadingMore
+              ? const Center(
+            child: SizedBox(
+              width: 18,
+              height: 18,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            ),
+          )
+              : const Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(
+                '프로젝트 더 보기',
+                style: TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.bold,
+                  color: _textDark,
+                ),
+              ),
+              Icon(
+                Icons.chevron_right_rounded,
+                color: _textGrey,
+                size: 20,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
 
-    final activeColor = data.isCompleted ? greenColor : primaryBlue;
+  Widget _buildProjectItem(FinanceProject project) {
+    final activeColor = project.isCompleted ? _greenColor : _primaryBlue;
+    final rate = (project.collectedRatio * 100).round();
 
     return Container(
       width: double.infinity,
@@ -338,7 +460,7 @@ class _FinanceProjectAmountsScreenState
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: const Color(0x1A000000), width: 1),
+        border: Border.all(color: _cardBorderColor, width: 1),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -349,24 +471,25 @@ class _FinanceProjectAmountsScreenState
             children: [
               Expanded(
                 child: Text(
-                  data.title,
+                  project.projectName,
                   style: const TextStyle(
                     fontSize: 15,
                     fontWeight: FontWeight.bold,
-                    color: textDark,
+                    color: _textDark,
                   ),
                 ),
               ),
               Container(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                padding:
+                const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                 decoration: BoxDecoration(
-                  color: data.isCompleted
+                  color: project.isCompleted
                       ? const Color(0xFFE6F4EA)
                       : const Color(0xFFEFF6FF),
                   borderRadius: BorderRadius.circular(6),
                 ),
                 child: Text(
-                  data.status,
+                  project.isCompleted ? '완료' : '진행 중',
                   style: TextStyle(
                     fontSize: 11,
                     fontWeight: FontWeight.bold,
@@ -387,15 +510,15 @@ class _FinanceProjectAmountsScreenState
                 children: [
                   const Text(
                     '수주 금액',
-                    style: TextStyle(fontSize: 11, color: textGrey),
+                    style: TextStyle(fontSize: 11, color: _textGrey),
                   ),
                   const SizedBox(height: 4),
                   Text(
-                    data.totalAmount,
+                    _won(project.orderAmount),
                     style: const TextStyle(
                       fontSize: 15,
                       fontWeight: FontWeight.bold,
-                      color: textDark,
+                      color: _textDark,
                     ),
                   ),
                 ],
@@ -405,11 +528,11 @@ class _FinanceProjectAmountsScreenState
                 children: [
                   const Text(
                     '입금 합계',
-                    style: TextStyle(fontSize: 11, color: textGrey),
+                    style: TextStyle(fontSize: 11, color: _textGrey),
                   ),
                   const SizedBox(height: 4),
                   Text(
-                    data.collectedAmount,
+                    _won(project.receivedAmount),
                     style: TextStyle(
                       fontSize: 15,
                       fontWeight: FontWeight.bold,
@@ -426,7 +549,7 @@ class _FinanceProjectAmountsScreenState
           ClipRRect(
             borderRadius: BorderRadius.circular(4),
             child: LinearProgressIndicator(
-              value: data.progress,
+              value: project.collectedRatio,
               minHeight: 6,
               backgroundColor: const Color(0xFFF3F4F6),
               valueColor: AlwaysStoppedAnimation<Color>(activeColor),
@@ -439,12 +562,14 @@ class _FinanceProjectAmountsScreenState
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
               Text(
-                '입금률 ${data.collectedRate}',
-                style: const TextStyle(fontSize: 11, color: textGrey),
+                '입금률 $rate%',
+                style: const TextStyle(fontSize: 11, color: _textGrey),
               ),
               Text(
-                data.unpaidText,
-                style: const TextStyle(fontSize: 11, color: textGrey),
+                project.unpaidAmount > 0
+                    ? '미수금 ${_won(project.unpaidAmount)}'
+                    : '미수금 없음',
+                style: const TextStyle(fontSize: 11, color: _textGrey),
               ),
             ],
           ),
@@ -452,26 +577,4 @@ class _FinanceProjectAmountsScreenState
       ),
     );
   }
-}
-
-class _ProjectData {
-  final String title;
-  final String status;
-  final bool isCompleted;
-  final String totalAmount;
-  final String collectedAmount;
-  final String collectedRate;
-  final String unpaidText;
-  final double progress;
-
-  _ProjectData({
-    required this.title,
-    required this.status,
-    required this.isCompleted,
-    required this.totalAmount,
-    required this.collectedAmount,
-    required this.collectedRate,
-    required this.unpaidText,
-    required this.progress,
-  });
 }

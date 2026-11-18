@@ -1,6 +1,12 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import '../app/router.dart';
+import 'package:teamspace/core/network/api_exception.dart';
+import 'package:teamspace/data/models/search_models.dart';
+import 'package:teamspace/data/repositories/search_repository.dart';
+import 'package:teamspace/shared/widgets/state_views.dart';
 
 class GlobalSearchScreen extends StatefulWidget {
   const GlobalSearchScreen({super.key});
@@ -10,21 +16,65 @@ class GlobalSearchScreen extends StatefulWidget {
 }
 
 class _GlobalSearchScreenState extends State<GlobalSearchScreen> {
-  final TextEditingController _searchController = TextEditingController(text: 'Book-on');
+  final TextEditingController _searchController = TextEditingController();
   int _selectedCategoryIndex = 0;
+  Timer? _debounce;
 
-  final List<String> _categories = [
-    '전체 6',
-    '문서·규정 2',
-    '프로젝트 1',
-    '팀원 1',
-    '공개 글·제안 2',
-  ];
+  SearchResult? _result;
+  bool _isLoading = false;
+  String? _errorMessage;
+  String _query = '';
 
   @override
   void dispose() {
+    _debounce?.cancel();
     _searchController.dispose();
     super.dispose();
+  }
+
+  void _onChanged(String value) {
+    _debounce?.cancel();
+    _debounce = Timer(const Duration(milliseconds: 500), () => _runSearch(value));
+    setState(() {});
+  }
+
+  Future<void> _runSearch(String value) async {
+    final trimmed = value.trim();
+    setState(() => _query = trimmed);
+    if (trimmed.length < 2) {
+      setState(() {
+        _result = null;
+        _errorMessage = null;
+        _isLoading = false;
+      });
+      return;
+    }
+    setState(() {
+      _isLoading = true;
+      _errorMessage = null;
+    });
+    try {
+      final result = await SearchRepository.instance.search(query: trimmed, limit: 50);
+      if (!mounted) return;
+      setState(() {
+        _result = result;
+        _isLoading = false;
+      });
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _errorMessage = e.message;
+        _isLoading = false;
+      });
+    }
+  }
+
+  void _toast(String message) {
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(content: Text(message), behavior: SnackBarBehavior.floating),
+      );
   }
 
   @override
@@ -34,6 +84,21 @@ class _GlobalSearchScreenState extends State<GlobalSearchScreen> {
     const textDark = Color(0xFF111827);
     const textSub = Color(0xFF64748B);
     const textLightGrey = Color(0xFF94A3B8);
+
+    final result = _result;
+    final postsAndProposals = result == null
+        ? const <SearchResultItem>[]
+        : [...result.posts, ...result.proposals];
+    final postsAndProposalsCount =
+    result == null ? 0 : result.counts.posts + result.counts.proposals;
+
+    final categories = [
+      '전체 ${result?.counts.total ?? 0}',
+      '문서·규정 ${result?.counts.documents ?? 0}',
+      '프로젝트 ${result?.counts.projects ?? 0}',
+      '팀원 ${result?.counts.people ?? 0}',
+      '공개 글·제안 $postsAndProposalsCount',
+    ];
 
     return Scaffold(
       backgroundColor: bgColor,
@@ -73,7 +138,7 @@ class _GlobalSearchScreenState extends State<GlobalSearchScreen> {
                     ),
                   ),
                   InkWell(
-                    onTap: () {},
+                    onTap: () => _toast('준비 중이에요.'),
                     borderRadius: BorderRadius.circular(20),
                     child: Container(
                       width: 36,
@@ -102,7 +167,7 @@ class _GlobalSearchScreenState extends State<GlobalSearchScreen> {
                   children: [
                     // 검색 헤더 타이틀
                     Text(
-                      '${_searchController.text} 검색 결과',
+                      _query.isEmpty ? '통합 검색' : '$_query 검색 결과',
                       style: const TextStyle(
                         fontSize: 22,
                         fontWeight: FontWeight.w800,
@@ -140,14 +205,15 @@ class _GlobalSearchScreenState extends State<GlobalSearchScreen> {
                           Expanded(
                             child: TextField(
                               controller: _searchController,
-                              onChanged: (_) => setState(() {}),
+                              autofocus: true,
+                              onChanged: _onChanged,
                               style: const TextStyle(
                                 fontSize: 14,
                                 fontWeight: FontWeight.bold,
                                 color: textDark,
                               ),
                               decoration: const InputDecoration(
-                                hintText: '검색어를 입력하세요',
+                                hintText: '검색어를 입력하세요 (2자 이상)',
                                 hintStyle: TextStyle(fontSize: 14, color: textLightGrey),
                                 border: InputBorder.none,
                                 isDense: true,
@@ -157,9 +223,8 @@ class _GlobalSearchScreenState extends State<GlobalSearchScreen> {
                           if (_searchController.text.isNotEmpty)
                             InkWell(
                               onTap: () {
-                                setState(() {
-                                  _searchController.clear();
-                                });
+                                _searchController.clear();
+                                _onChanged('');
                               },
                               child: const Icon(
                                 Icons.cancel_rounded,
@@ -172,325 +237,170 @@ class _GlobalSearchScreenState extends State<GlobalSearchScreen> {
                     ),
                     const SizedBox(height: 16),
 
-                    // 카테고리 필터 칩 (가로 스크롤)
-                    SingleChildScrollView(
-                      scrollDirection: Axis.horizontal,
-                      child: Row(
-                        children: List.generate(_categories.length, (index) {
-                          final isSelected = _selectedCategoryIndex == index;
-                          return Padding(
-                            padding: const EdgeInsets.only(right: 8),
-                            child: InkWell(
-                              onTap: () => setState(() => _selectedCategoryIndex = index),
-                              borderRadius: BorderRadius.circular(16),
-                              child: AnimatedContainer(
-                                duration: const Duration(milliseconds: 150),
-                                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-                                decoration: BoxDecoration(
-                                  color: isSelected ? primaryBlue : const Color(0xFFF1F5F9),
-                                  borderRadius: BorderRadius.circular(16),
-                                ),
-                                child: Text(
-                                  _categories[index],
-                                  style: TextStyle(
-                                    fontSize: 12,
-                                    fontWeight: FontWeight.bold,
-                                    color: isSelected ? Colors.white : textSub,
+                    if (_query.isNotEmpty) ...[
+                      // 카테고리 필터 칩 (가로 스크롤)
+                      SingleChildScrollView(
+                        scrollDirection: Axis.horizontal,
+                        child: Row(
+                          children: List.generate(categories.length, (index) {
+                            final isSelected = _selectedCategoryIndex == index;
+                            return Padding(
+                              padding: const EdgeInsets.only(right: 8),
+                              child: InkWell(
+                                onTap: () => setState(() => _selectedCategoryIndex = index),
+                                borderRadius: BorderRadius.circular(16),
+                                child: AnimatedContainer(
+                                  duration: const Duration(milliseconds: 150),
+                                  padding:
+                                  const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                                  decoration: BoxDecoration(
+                                    color: isSelected ? primaryBlue : const Color(0xFFF1F5F9),
+                                    borderRadius: BorderRadius.circular(16),
+                                  ),
+                                  child: Text(
+                                    categories[index],
+                                    style: TextStyle(
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.bold,
+                                      color: isSelected ? Colors.white : textSub,
+                                    ),
                                   ),
                                 ),
                               ),
-                            ),
-                          );
-                        }),
+                            );
+                          }),
+                        ),
                       ),
-                    ),
-                    const SizedBox(height: 16),
+                      const SizedBox(height: 16),
 
-                    // 결과 개수 및 정렬 정보
-                    const Text(
-                      '총 6개 · 관련도순',
-                      style: TextStyle(
-                        fontSize: 13,
-                        color: textSub,
+                      // 결과 개수 및 정렬 정보
+                      Text(
+                        '총 ${result?.counts.total ?? 0}개 · 관련도순',
+                        style: const TextStyle(
+                          fontSize: 13,
+                          color: textSub,
+                        ),
                       ),
-                    ),
-                    const SizedBox(height: 12),
-
-                    // 권한 및 익명 안내 박스
-                    Container(
-                      width: double.infinity,
-                      padding: const EdgeInsets.all(16),
-                      decoration: BoxDecoration(
-                        color: const Color(0xFFEFF6FF),
-                        borderRadius: BorderRadius.circular(20),
-                      ),
-                      child: Row(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: const [
-                          Icon(
-                            Icons.info_outline_rounded,
-                            color: primaryBlue,
-                            size: 18,
-                          ),
-                          SizedBox(width: 8),
-                          Expanded(
-                            child: Text(
-                              '권한 내 결과만 표시해요. 익명 문의와 익명 작성자의 신원·소속·신원을 유추할 수 있는 스니펫은 색인과 검색 결과에서 제외돼요. 내 익명 활동은 내 공간에서만 확인해요.',
-                              style: TextStyle(
-                                fontSize: 12,
-                                color: primaryBlue,
-                                height: 1.4,
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                    const SizedBox(height: 24),
-
-                    // --- [섹션 1] 문서·규정 (2건) ---
-                    if (_selectedCategoryIndex == 0 || _selectedCategoryIndex == 1) ...[
-                      _buildSectionTitle('문서·규정', 2),
                       const SizedBox(height: 12),
 
-                      _buildResultCard(
-                        categoryTag: '프로젝트 문서',
-                        title: 'Book-on QA 체크리스트',
-                        subText: '10.23 QA 점검을 위한 테스트 항목과 담당 업무를 확인해요.',
-                        dateAuthor: 'NativeLab · 이시우 · 10.15 수정',
-                        actionLabel: '문서 열기',
-                        onTap: () => context.push(AppRoutes.documentList),
-                      ),
-                      const SizedBox(height: 14),
-
-                      _buildResultCard(
-                        categoryTag: '운영 규정',
-                        title: '프로젝트 운영 원칙 v1.3',
-                        subText: 'Book-on 팀 프로젝트의 제안 검토 기한: 3주 → 2주',
-                        dateAuthor: '개정 10.11 · 시행 10.20 · NativeOps',
-                        actionLabel: '규정 본문 보기',
-                        onTap: () => context.push(AppRoutes.ruleDetail),
-                      ),
-                      const SizedBox(height: 24),
-                    ],
-
-                    // --- [섹션 2] 프로젝트 (1건) ---
-                    if (_selectedCategoryIndex == 0 || _selectedCategoryIndex == 2) ...[
-                      _buildSectionTitle('프로젝트', 1),
-                      const SizedBox(height: 12),
-
+                      // 권한 및 익명 안내 박스
                       Container(
                         width: double.infinity,
-                        padding: const EdgeInsets.all(20),
+                        padding: const EdgeInsets.all(16),
                         decoration: BoxDecoration(
-                          color: Colors.white,
-                          borderRadius: BorderRadius.circular(24),
-                          boxShadow: const [
-                            BoxShadow(
-                              color: Color.fromRGBO(0, 0, 0, 0.02),
-                              blurRadius: 8,
-                              offset: Offset(0, 2),
-                            ),
-                          ],
+                          color: const Color(0xFFEFF6FF),
+                          borderRadius: BorderRadius.circular(20),
                         ),
-                        child: Column(
+                        child: Row(
                           crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Row(
-                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                              children: [
-                                const Text(
-                                  'NativeLab · PM 이시우 · 6명',
-                                  style: TextStyle(fontSize: 12, color: textLightGrey),
+                          children: const [
+                            Icon(
+                              Icons.info_outline_rounded,
+                              color: primaryBlue,
+                              size: 18,
+                            ),
+                            SizedBox(width: 8),
+                            Expanded(
+                              child: Text(
+                                '권한 내 결과만 표시해요. 익명 문의와 익명 작성자의 신원·소속·신원을 유추할 수 있는 스니펫은 색인과 검색 결과에서 제외돼요. 내 익명 활동은 내 공간에서만 확인해요.',
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  color: primaryBlue,
+                                  height: 1.4,
                                 ),
-                                Container(
-                                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                                  decoration: BoxDecoration(
-                                    color: const Color(0xFFEFF6FF),
-                                    borderRadius: BorderRadius.circular(10),
-                                  ),
-                                  child: const Text(
-                                    '진행 중',
-                                    style: TextStyle(
-                                      fontSize: 11,
-                                      fontWeight: FontWeight.bold,
-                                      color: primaryBlue,
-                                    ),
-                                  ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 24),
+
+                      if (_isLoading)
+                        const SkeletonList(count: 3)
+                      else if (_errorMessage != null)
+                        ErrorStateView(
+                          message: _errorMessage,
+                          onRetry: () => _runSearch(_searchController.text),
+                        )
+                      else if (result == null || result.counts.total == 0)
+                          const EmptyStateView(
+                            title: '검색 결과가 없어요',
+                            description: '다른 검색어로 다시 시도해보세요.',
+                          )
+                        else ...[
+                            // --- [섹션 1] 문서·규정 ---
+                            if ((_selectedCategoryIndex == 0 || _selectedCategoryIndex == 1) &&
+                                result.documents.isNotEmpty) ...[
+                              _buildSectionTitle('문서·규정', result.documents.length),
+                              const SizedBox(height: 12),
+                              for (final item in result.documents) ...[
+                                _buildResultCard(
+                                  categoryTag: item.docType?.isNotEmpty == true
+                                      ? item.docType!
+                                      : '문서·규정',
+                                  title: item.title,
+                                  subText: item.snippet,
+                                  dateAuthor: item.version != null
+                                      ? 'v${item.version} · ${_dateLabel(item.createdAt)}'
+                                      : _dateLabel(item.createdAt),
+                                  actionLabel: '문서함에서 보기',
+                                  onTap: () => context.push(AppRoutes.documentList),
                                 ),
+                                const SizedBox(height: 14),
                               ],
-                            ),
-                            const SizedBox(height: 8),
-                            const Text(
-                              'Book-on',
-                              style: TextStyle(
-                                fontSize: 16,
-                                fontWeight: FontWeight.bold,
-                                color: textDark,
-                              ),
-                            ),
-                            const SizedBox(height: 4),
-                            const Text(
-                              '독서 기록과 습관 만들기를 돕는 iOS 앱',
-                              style: TextStyle(fontSize: 13, color: textSub),
-                            ),
-                            const SizedBox(height: 6),
-                            const Text(
-                              '2026.07.01–11.30 · 진행률 68%',
-                              style: TextStyle(fontSize: 12, color: textLightGrey),
-                            ),
-                            const SizedBox(height: 14),
-                            InkWell(
-                              onTap: () => context.push(AppRoutes.projectDetail),
-                              borderRadius: BorderRadius.circular(8),
-                              child: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: const [
-                                  Text(
-                                    '프로젝트 보기',
-                                    style: TextStyle(
-                                      fontSize: 13,
-                                      fontWeight: FontWeight.bold,
-                                      color: primaryBlue,
-                                    ),
-                                  ),
-                                  SizedBox(width: 4),
-                                  Icon(
-                                    Icons.chevron_right_rounded,
-                                    size: 18,
-                                    color: primaryBlue,
-                                  ),
-                                ],
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                      const SizedBox(height: 24),
-                    ],
+                              const SizedBox(height: 10),
+                            ],
 
-                    // --- [섹션 3] 팀원 (1건) ---
-                    if (_selectedCategoryIndex == 0 || _selectedCategoryIndex == 3) ...[
-                      _buildSectionTitle('팀원', 1),
-                      const SizedBox(height: 12),
-
-                      Container(
-                        width: double.infinity,
-                        padding: const EdgeInsets.all(20),
-                        decoration: BoxDecoration(
-                          color: Colors.white,
-                          borderRadius: BorderRadius.circular(24),
-                          boxShadow: const [
-                            BoxShadow(
-                              color: Color.fromRGBO(0, 0, 0, 0.02),
-                              blurRadius: 8,
-                              offset: Offset(0, 2),
-                            ),
-                          ],
-                        ),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Row(
-                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                              children: [
-                                const Text(
-                                  '이시우',
-                                  style: TextStyle(
-                                    fontSize: 16,
-                                    fontWeight: FontWeight.bold,
-                                    color: textDark,
-                                  ),
-                                ),
-                                Container(
-                                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                                  decoration: BoxDecoration(
-                                    color: const Color(0xFFEFF6FF),
-                                    borderRadius: BorderRadius.circular(10),
-                                  ),
-                                  child: const Text(
-                                    '공개 프로필',
-                                    style: TextStyle(
-                                      fontSize: 11,
-                                      fontWeight: FontWeight.bold,
-                                      color: primaryBlue,
-                                    ),
-                                  ),
-                                ),
+                            // --- [섹션 2] 프로젝트 ---
+                            if ((_selectedCategoryIndex == 0 || _selectedCategoryIndex == 2) &&
+                                result.projects.isNotEmpty) ...[
+                              _buildSectionTitle('프로젝트', result.projects.length),
+                              const SizedBox(height: 12),
+                              for (final item in result.projects) ...[
+                                _buildProjectCard(item),
+                                const SizedBox(height: 14),
                               ],
-                            ),
-                            const SizedBox(height: 4),
-                            const Text(
-                              'NativeLab · Book-on PM',
-                              style: TextStyle(fontSize: 13, color: textSub),
-                            ),
-                            const SizedBox(height: 14),
-                            InkWell(
-                              onTap: () => context.push(AppRoutes.memberProfile),
-                              borderRadius: BorderRadius.circular(8),
-                              child: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: const [
-                                  Text(
-                                    '팀원 소개 보기',
-                                    style: TextStyle(
-                                      fontSize: 13,
-                                      fontWeight: FontWeight.bold,
-                                      color: primaryBlue,
-                                    ),
+                              const SizedBox(height: 10),
+                            ],
+
+                            // --- [섹션 3] 팀원 ---
+                            if ((_selectedCategoryIndex == 0 || _selectedCategoryIndex == 3) &&
+                                result.people.isNotEmpty) ...[
+                              _buildSectionTitle('팀원', result.people.length),
+                              const SizedBox(height: 12),
+                              for (final item in result.people) ...[
+                                _buildPersonCard(item),
+                                const SizedBox(height: 14),
+                              ],
+                              const SizedBox(height: 10),
+                            ],
+
+                            // --- [섹션 4] 공개 게시글·운영 제안 ---
+                            if ((_selectedCategoryIndex == 0 || _selectedCategoryIndex == 4) &&
+                                postsAndProposals.isNotEmpty) ...[
+                              _buildSectionTitle('공개 게시글·운영 제안', postsAndProposals.length),
+                              const SizedBox(height: 12),
+                              for (final item in postsAndProposals) ...[
+                                _buildResultCard(
+                                  categoryTag: item.category == 'posts' ? '공개 게시글' : '운영 제안',
+                                  title: item.title,
+                                  subText: item.snippet,
+                                  dateAuthor: item.category == 'posts'
+                                      ? '${item.author ?? ''} · ${_dateLabel(item.createdAt)} · 댓글 ${item.comments ?? 0}'
+                                      : '${_dateLabel(item.createdAt)} · 추천 ${item.likes ?? 0} · ${item.status ?? ''}',
+                                  actionLabel: item.category == 'posts' ? '게시글 보기' : '운영 제안 상세 보기',
+                                  onTap: () => context.push(
+                                    item.category == 'posts'
+                                        ? '${AppRoutes.postDetail}?id=${item.id}'
+                                        : '${AppRoutes.proposalDetail}?id=${item.id}',
                                   ),
-                                  SizedBox(width: 4),
-                                  Icon(
-                                    Icons.chevron_right_rounded,
-                                    size: 18,
-                                    color: primaryBlue,
-                                  ),
-                                ],
-                              ),
-                            ),
+                                ),
+                                const SizedBox(height: 14),
+                              ],
+                            ],
                           ],
-                        ),
-                      ),
-                      const SizedBox(height: 24),
                     ],
-
-                    // --- [섹션 4] 공개 게시글·운영 제안 (2건) ---
-                    if (_selectedCategoryIndex == 0 || _selectedCategoryIndex == 4) ...[
-                      _buildSectionTitle('공개 게시글·운영 제안', 2),
-                      const SizedBox(height: 12),
-
-                      _buildResultCard(
-                        categoryTag: '공개 게시글 · 팀 소식',
-                        title: 'Book-on QA 일정 공유',
-                        subText: '',
-                        dateAuthor: '이시우 · 10.15 · 댓글 2',
-                        actionLabel: '게시글 보기',
-                        onTap: () => context.push(AppRoutes.postDetail),
-                      ),
-                      const SizedBox(height: 14),
-
-                      _buildResultCard(
-                        categoryTag: '운영 제안 · 협업',
-                        title: '회의 기록 양식을 통일해요',
-                        subText: '회의 기록 양식을 통일시키면 더욱 보기 편할 것 같아요.',
-                        dateAuthor: '옥물결 · 10.07 · 추천 18 · 검토 중',
-                        actionLabel: '운영 제안 상세 보기',
-                        onTap: () => context.push(AppRoutes.proposalDetail),
-                      ),
-                      const SizedBox(height: 24),
-                    ],
-
-                    // 푸터 날짜
-                    const Center(
-                      child: Text(
-                        '2026.10.16 기준',
-                        style: TextStyle(
-                          fontSize: 11,
-                          color: textLightGrey,
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: 30),
+                    const SizedBox(height: 20),
                   ],
                 ),
               ),
@@ -499,6 +409,11 @@ class _GlobalSearchScreenState extends State<GlobalSearchScreen> {
         ),
       ),
     );
+  }
+
+  String _dateLabel(DateTime? dt) {
+    if (dt == null) return '';
+    return '${dt.year}.${dt.month.toString().padLeft(2, '0')}.${dt.day.toString().padLeft(2, '0')}';
   }
 
   Widget _buildSectionTitle(String title, int count) {
@@ -523,6 +438,169 @@ class _GlobalSearchScreenState extends State<GlobalSearchScreen> {
           ),
         ),
       ],
+    );
+  }
+
+  Widget _buildProjectCard(SearchResultItem item) {
+    const textDark = Color(0xFF111827);
+    const textSub = Color(0xFF64748B);
+    const textLightGrey = Color(0xFF94A3B8);
+    const primaryBlue = Color(0xFF3182F6);
+
+    final metaParts = [
+      if (item.dept?.isNotEmpty == true) item.dept!,
+      if (item.pm?.isNotEmpty == true) 'PM ${item.pm}',
+    ];
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(24),
+        boxShadow: const [
+          BoxShadow(
+            color: Color.fromRGBO(0, 0, 0, 0.02),
+            blurRadius: 8,
+            offset: Offset(0, 2),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (metaParts.isNotEmpty)
+            Text(
+              metaParts.join(' · '),
+              style: const TextStyle(fontSize: 12, color: textLightGrey),
+            ),
+          const SizedBox(height: 8),
+          Text(
+            item.title,
+            style: const TextStyle(
+              fontSize: 16,
+              fontWeight: FontWeight.bold,
+              color: textDark,
+            ),
+          ),
+          if (item.snippet.isNotEmpty) ...[
+            const SizedBox(height: 4),
+            Text(
+              item.snippet,
+              style: const TextStyle(fontSize: 13, color: textSub),
+            ),
+          ],
+          if (item.progress != null) ...[
+            const SizedBox(height: 6),
+            Text(
+              '진행률 ${item.progress}%',
+              style: const TextStyle(fontSize: 12, color: textLightGrey),
+            ),
+          ],
+          const SizedBox(height: 14),
+          InkWell(
+            onTap: () => context.push(AppRoutes.projectDetail),
+            borderRadius: BorderRadius.circular(8),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: const [
+                Text(
+                  '프로젝트 보기',
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.bold,
+                    color: primaryBlue,
+                  ),
+                ),
+                SizedBox(width: 4),
+                Icon(
+                  Icons.chevron_right_rounded,
+                  size: 18,
+                  color: primaryBlue,
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildPersonCard(SearchResultItem item) {
+    const textDark = Color(0xFF111827);
+    const textSub = Color(0xFF64748B);
+    const primaryBlue = Color(0xFF3182F6);
+
+    final parts = item.snippet.split(' · ').where((e) => e.isNotEmpty).toList();
+    final department = parts.isNotEmpty ? parts[0] : '';
+    final role = parts.length > 1 ? parts[1] : '';
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(24),
+        boxShadow: const [
+          BoxShadow(
+            color: Color.fromRGBO(0, 0, 0, 0.02),
+            blurRadius: 8,
+            offset: Offset(0, 2),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            item.title,
+            style: const TextStyle(
+              fontSize: 16,
+              fontWeight: FontWeight.bold,
+              color: textDark,
+            ),
+          ),
+          if (item.snippet.isNotEmpty) ...[
+            const SizedBox(height: 4),
+            Text(
+              item.snippet,
+              style: const TextStyle(fontSize: 13, color: textSub),
+            ),
+          ],
+          const SizedBox(height: 14),
+          InkWell(
+            onTap: () => context.push(
+              AppRoutes.memberProfile,
+              extra: {
+                'id': item.id,
+                'name': item.title,
+                'department': department,
+                'role': role,
+              },
+            ),
+            borderRadius: BorderRadius.circular(8),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: const [
+                Text(
+                  '팀원 소개 보기',
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.bold,
+                    color: primaryBlue,
+                  ),
+                ),
+                SizedBox(width: 4),
+                Icon(
+                  Icons.chevron_right_rounded,
+                  size: 18,
+                  color: primaryBlue,
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
     );
   }
 
