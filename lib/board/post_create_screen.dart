@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import '../app/router.dart';
+import 'package:teamspace/core/network/api_exception.dart';
+import 'package:teamspace/data/repositories/community_repository.dart';
 
 class PostCreateScreen extends StatefulWidget {
   const PostCreateScreen({super.key});
@@ -14,15 +16,12 @@ class _PostCreateScreenState extends State<PostCreateScreen> {
   String _selectedCategory = '자유'; // 카테고리 (자유 / 질문 / 정보공유)
   bool _isAnonymousComment = true; // 댓글 작성 정책 (기본값: 익명 댓글)
 
-  final TextEditingController _titleController = TextEditingController(
-    text: '게임을 대해서 어떻게 생각하시나요',
-  );
-  final TextEditingController _contentController = TextEditingController(
-    text: '저는 발로를 끊었더니 진짜 죽을맛입니다.\n다이아는 찍고 접고 싶었는데…\n\n그래도 취업을 위해서라면 ㅎㅇㅌ',
-  );
+  final TextEditingController _titleController = TextEditingController();
+  final TextEditingController _contentController = TextEditingController();
 
   int _contentLength = 0;
   static const int _maxContentLength = 5000;
+  bool _isSubmitting = false;
 
   @override
   void initState() {
@@ -45,8 +44,50 @@ class _PostCreateScreenState extends State<PostCreateScreen> {
     super.dispose();
   }
 
+  void _toast(String message) {
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  Future<void> _submit({required bool asDraft}) async {
+    final title = _titleController.text.trim();
+    final body = _contentController.text.trim();
+    if (!asDraft && (title.isEmpty || body.isEmpty)) {
+      _toast('제목과 내용을 모두 입력해 주세요.');
+      return;
+    }
+    if (asDraft && title.isEmpty && body.isEmpty) {
+      _toast('저장할 내용이 없어요.');
+      return;
+    }
+    if (_isSubmitting) return;
+    setState(() => _isSubmitting = true);
+    try {
+      final newId = await CommunityRepository.instance.createPost(
+        category: _selectedCategory,
+        title: title,
+        body: body,
+        anonymous: _isAnonymousAuthor,
+        anonComments: _isAnonymousComment,
+        draft: asDraft,
+      );
+      if (!mounted) return;
+      if (asDraft) {
+        _toast('임시 저장되었습니다.');
+        context.pop();
+      } else {
+        _showPostSuccessDialog(context, newId);
+      }
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      setState(() => _isSubmitting = false);
+      _toast(e.message);
+    }
+  }
+
   // 💡 피그마 10-9 게시 완료 Alert 팝업 모달
-  void _showPostSuccessDialog(BuildContext context) {
+  void _showPostSuccessDialog(BuildContext context, String newPostId) {
     showDialog(
       context: context,
       barrierDismissible: false,
@@ -148,7 +189,7 @@ class _PostCreateScreenState extends State<PostCreateScreen> {
                   child: ElevatedButton(
                     onPressed: () {
                       Navigator.of(dialogContext).pop();
-                      context.pushReplacement(AppRoutes.postDetail);
+                      context.pushReplacement('${AppRoutes.postDetail}?id=$newPostId');
                     },
                     style: ElevatedButton.styleFrom(
                       backgroundColor: const Color(0xFFF1F5F9),
@@ -232,7 +273,7 @@ class _PostCreateScreenState extends State<PostCreateScreen> {
 
                   // 임시 저장 버튼
                   TextButton(
-                    onPressed: () {},
+                    onPressed: _isSubmitting ? null : () => _submit(asDraft: true),
                     style: TextButton.styleFrom(
                       backgroundColor: const Color(0xFFF1F5F9),
                       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
@@ -431,6 +472,7 @@ class _PostCreateScreenState extends State<PostCreateScreen> {
                           // 제목 입력
                           TextField(
                             controller: _titleController,
+                            enabled: !_isSubmitting,
                             style: const TextStyle(
                               fontSize: 16,
                               fontWeight: FontWeight.bold,
@@ -456,8 +498,10 @@ class _PostCreateScreenState extends State<PostCreateScreen> {
                           // 본문 입력
                           TextField(
                             controller: _contentController,
+                            enabled: !_isSubmitting,
                             maxLines: 7,
                             minLines: 5,
+                            maxLength: _maxContentLength,
                             style: const TextStyle(
                               fontSize: 14,
                               color: textDark,
@@ -472,6 +516,7 @@ class _PostCreateScreenState extends State<PostCreateScreen> {
                               border: InputBorder.none,
                               isDense: true,
                               contentPadding: EdgeInsets.zero,
+                              counterText: '',
                             ),
                           ),
                           const SizedBox(height: 12),
@@ -529,7 +574,7 @@ class _PostCreateScreenState extends State<PostCreateScreen> {
 
                           // 이미지 첨부하기 버튼
                           ElevatedButton(
-                            onPressed: () {},
+                            onPressed: () => _toast('이미지 첨부는 준비 중이에요.'),
                             style: ElevatedButton.styleFrom(
                               backgroundColor: const Color(0xFFEFF6FF),
                               elevation: 0,
@@ -642,16 +687,22 @@ class _PostCreateScreenState extends State<PostCreateScreen> {
                       width: double.infinity,
                       height: 52,
                       child: ElevatedButton(
-                        // 💡 클릭 시 게시 완료 팝업 다이얼로그 호출
-                        onPressed: () => _showPostSuccessDialog(context),
+                        onPressed: _isSubmitting ? null : () => _submit(asDraft: false),
                         style: ElevatedButton.styleFrom(
                           backgroundColor: primaryBlue,
+                          disabledBackgroundColor: primaryBlue,
                           elevation: 0,
                           shape: RoundedRectangleBorder(
                             borderRadius: BorderRadius.circular(16),
                           ),
                         ),
-                        child: Text(
+                        child: _isSubmitting
+                            ? const SizedBox(
+                          width: 20,
+                          height: 20,
+                          child: CircularProgressIndicator(strokeWidth: 2.2, color: Colors.white),
+                        )
+                            : Text(
                           _isAnonymousAuthor ? '익명으로 게시하기' : '실명으로 게시하기',
                           style: const TextStyle(
                             fontSize: 15,

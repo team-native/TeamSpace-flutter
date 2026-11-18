@@ -2,16 +2,19 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import '../app/router.dart';
 import 'package:teamspace/core/network/api_exception.dart';
-import 'package:teamspace/data/models/member_models.dart';
-import 'package:teamspace/data/repositories/member_repository.dart';
+import 'package:teamspace/data/models/people_models.dart';
+import 'package:teamspace/data/repositories/people_repository.dart';
 import 'package:teamspace/shared/widgets/default_profile_avatar.dart';
 import 'package:teamspace/shared/widgets/state_views.dart';
 
-/// 상단 필터 칩 (서버의 department / role 쿼리로 변환돼요)
+/// 상단 필터 칩.
+/// 서버 GET /people의 dept 필터는 NativeLab · NativeOps · FA · IT 4개뿐이라서
+/// (그 외 부서, 역할별 필터는 서버에 없음) 전체 목록을 한 번에 받아온 뒤
+/// department / roles 필드로 클라이언트에서 직접 걸러요.
 class _CategoryFilter {
   final String label;
-  final String? department;
-  final String? role;
+  final String? department; // PersonSummary.department 와 정확히 같아야 매칭돼요
+  final String? role; // PersonSummary.roles 안에 있으면 매칭돼요 (대소문자 무시)
 
   const _CategoryFilter(this.label, {this.department, this.role});
 }
@@ -54,12 +57,10 @@ class _TeamMemberListScreenState extends State<TeamMemberListScreen> {
   int _selectedTab = 0;
   _CategoryFilter _filter = _filters.first;
 
-  // 목록 탭
-  List<MemberSummary> _members = [];
-  int _totalCount = 0;
-  int _page = 1;
+  // 목록 탭 — 서버는 cursor 페이지라 전체를 한 번에 받고, 화면 표시만 나눠서 보여줘요
+  List<PersonSummary> _allMembers = [];
+  int _displayCount = _pageSize;
   bool _isLoading = true;
-  bool _isLoadingMore = false;
   String? _errorMessage;
 
   // 조직도 탭
@@ -90,17 +91,11 @@ class _TeamMemberListScreenState extends State<TeamMemberListScreen> {
     });
 
     try {
-      final result = await MemberRepository.instance.getMembers(
-        page: 1,
-        limit: _pageSize,
-        department: _filter.department,
-        role: _filter.role,
-      );
+      final result = await PeopleRepository.instance.getAllPeople();
       if (!mounted) return;
       setState(() {
-        _members = result.list;
-        _totalCount = result.totalCount;
-        _page = 1;
+        _allMembers = result;
+        _displayCount = _pageSize;
         _isLoading = false;
       });
     } on ApiException catch (e) {
@@ -118,31 +113,6 @@ class _TeamMemberListScreenState extends State<TeamMemberListScreen> {
     }
   }
 
-  Future<void> _loadMore() async {
-    if (_isLoadingMore) return;
-    setState(() => _isLoadingMore = true);
-
-    try {
-      final result = await MemberRepository.instance.getMembers(
-        page: _page + 1,
-        limit: _pageSize,
-        department: _filter.department,
-        role: _filter.role,
-      );
-      if (!mounted) return;
-      setState(() {
-        _members = [..._members, ...result.list];
-        _totalCount = result.totalCount;
-        _page += 1;
-        _isLoadingMore = false;
-      });
-    } catch (e) {
-      if (!mounted) return;
-      setState(() => _isLoadingMore = false);
-      _showSnack(e is ApiException ? e.message : '더 불러오지 못했어요.');
-    }
-  }
-
   Future<void> _loadOrgTree() async {
     setState(() {
       _orgLoading = true;
@@ -150,7 +120,7 @@ class _TeamMemberListScreenState extends State<TeamMemberListScreen> {
     });
 
     try {
-      final result = await MemberRepository.instance.getOrgTree();
+      final result = await PeopleRepository.instance.getOrgTree();
       if (!mounted) return;
       setState(() {
         _departments = result;
@@ -173,20 +143,27 @@ class _TeamMemberListScreenState extends State<TeamMemberListScreen> {
 
   void _selectFilter(_CategoryFilter filter) {
     if (_filter == filter) return;
-    setState(() => _filter = filter);
-    _loadMembers();
+    setState(() {
+      _filter = filter;
+      _displayCount = _pageSize;
+    });
+  }
+
+  bool _filterMatches(_CategoryFilter filter, PersonSummary person) {
+    if (filter.role != null &&
+        !person.roles.any((r) => r.toLowerCase() == filter.role!.toLowerCase())) {
+      return false;
+    }
+    if (filter.department != null && person.department != filter.department) {
+      return false;
+    }
+    return true;
   }
 
   // ───────────── 공통 헬퍼 ─────────────
 
-  void _showSnack(String message) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(message)),
-    );
-  }
-
   void _openProfile({
-    required int id,
+    required String id,
     required String name,
     required String role,
     required String department,
@@ -200,6 +177,15 @@ class _TeamMemberListScreenState extends State<TeamMemberListScreen> {
         'department': department,
       },
     );
+  }
+
+  /// 목록 카드에 보여줄 역할 태그. 실제로 가진 역할(roles) 중 눈에 띄는 것 하나만 골라요.
+  /// (서버 /people의 role 필드는 전공 표시용이라, 리더/관리 역할 뱃지에는 안 써요)
+  String _primaryRoleTag(PersonSummary person) {
+    for (final tag in const ['Admin', 'Leader', 'FA']) {
+      if (person.hasRole(tag)) return tag;
+    }
+    return '';
   }
 
   /// 역할별 태그 색 (서버는 색을 주지 않아요): (배경, 글자)
@@ -266,9 +252,10 @@ class _TeamMemberListScreenState extends State<TeamMemberListScreen> {
 
   void _resetFilters() {
     _searchController.clear();
-    final needsReload = _filter != _filters.first;
-    setState(() => _filter = _filters.first);
-    if (needsReload) _loadMembers();
+    setState(() {
+      _filter = _filters.first;
+      _displayCount = _pageSize;
+    });
   }
 
   // ───────────── 화면 ─────────────
@@ -303,7 +290,9 @@ class _TeamMemberListScreenState extends State<TeamMemberListScreen> {
                     const SizedBox(height: 4),
                     Text(
                       _selectedTab == 0
-                          ? (_totalCount > 0 ? 'Native $_totalCount명' : 'Native')
+                          ? (_allMembers.isNotEmpty
+                          ? 'Native ${_allMembers.length}명'
+                          : 'Native')
                           : '부서를 누르면 구성원을 볼 수 있어요.',
                       style: const TextStyle(fontSize: 13, color: _textSub),
                     ),
@@ -426,16 +415,23 @@ class _TeamMemberListScreenState extends State<TeamMemberListScreen> {
 
   // ───────────── 목록 탭 ─────────────
 
-  // 검색은 이미 불러온 목록 안에서만 해요 (서버에 검색어 파라미터가 없어서)
-  List<MemberSummary> get _visibleMembers {
+  // 검색 + 필터를 전부 받아온 전체 목록 안에서 클라이언트가 직접 처리해요
+  List<PersonSummary> get _filteredMembers {
     final keyword = _searchController.text.trim().toLowerCase();
-    if (keyword.isEmpty) return _members;
 
-    return _members.where((m) {
+    return _allMembers.where((m) {
+      if (!_filterMatches(_filter, m)) return false;
+      if (keyword.isEmpty) return true;
       return m.name.toLowerCase().contains(keyword) ||
           m.role.toLowerCase().contains(keyword) ||
           m.department.toLowerCase().contains(keyword);
     }).toList();
+  }
+
+  List<PersonSummary> get _visibleMembers {
+    final filtered = _filteredMembers;
+    if (_displayCount >= filtered.length) return filtered;
+    return filtered.sublist(0, _displayCount);
   }
 
   Widget _buildListContent() {
@@ -452,7 +448,7 @@ class _TeamMemberListScreenState extends State<TeamMemberListScreen> {
           _buildError(_errorMessage!, _loadMembers)
         else ...[
             _buildMemberCard(),
-            if (_members.length < _totalCount) ...[
+            if (_displayCount < _filteredMembers.length) ...[
               const SizedBox(height: 16),
               _buildLoadMoreButton(),
             ],
@@ -472,7 +468,7 @@ class _TeamMemberListScreenState extends State<TeamMemberListScreen> {
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 2),
       child: TextField(
         controller: _searchController,
-        onChanged: (_) => setState(() {}),
+        onChanged: (_) => setState(() => _displayCount = _pageSize),
         decoration: const InputDecoration(
           hintText: '이름, 부서, 역할로 검색',
           hintStyle: TextStyle(fontSize: 14, color: _textLightGrey),
@@ -564,7 +560,7 @@ class _TeamMemberListScreenState extends State<TeamMemberListScreen> {
                   ),
                   child: Row(
                     children: [
-                      const DefaultProfileAvatar(size: 40),
+                      DefaultProfileAvatar(size: 40, imageUrl: member.photo),
                       const SizedBox(width: 12),
                       Expanded(
                         child: Column(
@@ -584,7 +580,7 @@ class _TeamMemberListScreenState extends State<TeamMemberListScreen> {
                                   ),
                                 ),
                                 const SizedBox(width: 6),
-                                _roleBadge(member.role),
+                                _roleBadge(_primaryRoleTag(member)),
                               ],
                             ),
                             const SizedBox(height: 4),
@@ -621,13 +617,13 @@ class _TeamMemberListScreenState extends State<TeamMemberListScreen> {
   }
 
   Widget _buildLoadMoreButton() {
-    final remaining = _totalCount - _members.length;
+    final remaining = _filteredMembers.length - _displayCount;
 
     return SizedBox(
       width: double.infinity,
       height: 48,
       child: ElevatedButton(
-        onPressed: _isLoadingMore ? null : _loadMore,
+        onPressed: () => setState(() => _displayCount += _pageSize),
         style: ElevatedButton.styleFrom(
           backgroundColor: Colors.white,
           elevation: 0,
@@ -636,13 +632,7 @@ class _TeamMemberListScreenState extends State<TeamMemberListScreen> {
             side: const BorderSide(color: _line),
           ),
         ),
-        child: _isLoadingMore
-            ? const SizedBox(
-          width: 18,
-          height: 18,
-          child: CircularProgressIndicator(strokeWidth: 2),
-        )
-            : Text(
+        child: Text(
           '$remaining명 더 보기',
           style: const TextStyle(
             fontSize: 14,
@@ -701,7 +691,7 @@ class _TeamMemberListScreenState extends State<TeamMemberListScreen> {
   Widget _buildLeaderCard(OrgMember leader, String departmentName) {
     return InkWell(
       onTap: () => _openProfile(
-        id: leader.id,
+        id: '${leader.id}',
         name: leader.name,
         role: leader.role,
         department: departmentName,
@@ -845,7 +835,7 @@ class _TeamMemberListScreenState extends State<TeamMemberListScreen> {
                 ...dept.members.map((member) {
                   return InkWell(
                     onTap: () => _openProfile(
-                      id: member.id,
+                      id: '${member.id}',
                       name: member.name,
                       role: member.role,
                       department: dept.name,
@@ -905,7 +895,7 @@ class _TeamMemberListScreenState extends State<TeamMemberListScreen> {
     );
   }
 
-  // 겹쳐 보이는 아바타 묶음
+  // 겹쳐 보이는 아바타 묶음 (조직도 카드 미리보기는 사진 없이 기본 아바타로 둬요)
   Widget _buildAvatarStack(int count) {
     return SizedBox(
       height: 32,

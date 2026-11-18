@@ -1,44 +1,15 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
+import 'package:intl/intl.dart';
+import 'package:teamspace/core/network/api_exception.dart';
+import 'package:teamspace/data/models/community_models.dart';
+import 'package:teamspace/data/repositories/community_repository.dart';
+import 'package:teamspace/shared/widgets/state_views.dart';
 import '../app/router.dart';
 
-enum InquiryStatus {
-  received('접수', Color(0xFFF1F5F9), Color(0xFF64748B)),
-  reviewing('검토 중', Color(0xFFEFF6FF), Color(0xFF3182F6)),
-  completed('답변 완료', Color(0xFFECFDF5), Color(0xFF10B981)),
-  rejected('반려', Color(0xFFFFF1F2), Color(0xFFF43F5E)); // 💡 반려 태그 추가
-
-  final String label;
-  final Color bgColor;
-  final Color textColor;
-
-  const InquiryStatus(this.label, this.bgColor, this.textColor);
-}
-
-class InquiryItemModel {
-  final String department;
-  final String date;
-  final bool isAnonymous;
-  final InquiryStatus status;
-  final String title;
-  final String? content;
-  final String? answerAuthor;
-  final String? answerDate;
-  final String? answerContent;
-
-  InquiryItemModel({
-    required this.department,
-    required this.date,
-    required this.isAnonymous,
-    required this.status,
-    required this.title,
-    this.content,
-    this.answerAuthor,
-    this.answerDate,
-    this.answerContent,
-  });
-}
-
+/// 내 문의
+/// - GET /inquiries  (내가 보낸 문의 전부)
+/// - 상태: 접수 · 검토 중 · 답변 완료 · 해결됨 (서버에는 '반려' 상태가 없어요)
 class MyInquiryListScreen extends StatefulWidget {
   const MyInquiryListScreen({super.key});
 
@@ -47,41 +18,69 @@ class MyInquiryListScreen extends StatefulWidget {
 }
 
 class _MyInquiryListScreenState extends State<MyInquiryListScreen> {
-  final List<InquiryItemModel> _inquiries = [
-    InquiryItemModel(
-      department: 'NativeOps',
-      date: '10.05',
-      isAnonymous: true,
-      status: InquiryStatus.rejected, // 💡 반려 문의 데이터 예시
-      title: '회의실을 앱에서 바로 예약할 수 있게 해주세요',
-      content: '지금은 단톡방에서 회의실을 잡다 보니 겹치는 일이 많아요. 앱에서 시간대를 보고 바로 예약하면 좋겠어요.',
-    ),
-    InquiryItemModel(
-      department: 'NativeOps',
-      date: '10.05',
-      isAnonymous: true,
-      status: InquiryStatus.completed,
-      title: '회의실 예약 기준을 정해 주세요',
-      content: '스터디와 프로젝트 회의가 같은 시간에 겹치는 일이 많아요.',
-      answerAuthor: 'NativeOps',
-      answerDate: '10.08',
-      answerContent: '좋은 의견 감사합니다. 다음 주부터 1회 최대 2시간, 프로젝트 회의 우선으로 운영할게요.',
-    ),
-    InquiryItemModel(
-      department: 'PMO',
-      date: '10.07',
-      isAnonymous: true,
-      status: InquiryStatus.reviewing,
-      title: '프로젝트 회고 시간을 제안해요',
-    ),
-    InquiryItemModel(
-      department: 'FA',
-      date: '10.09',
-      isAnonymous: false,
-      status: InquiryStatus.received,
-      title: '정산 내역 안내를 개선해 주세요',
-    ),
-  ];
+  static final DateFormat _mdFmt = DateFormat('MM.dd');
+
+  List<InquirySummary> _inquiries = const [];
+  bool _isLoading = true;
+  String? _errorMessage;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load({bool quiet = false}) async {
+    if (!quiet) {
+      setState(() {
+        _isLoading = true;
+        _errorMessage = null;
+      });
+    }
+    try {
+      final items = await CommunityRepository.instance.getMyInquiries();
+      if (!mounted) return;
+      setState(() {
+        _inquiries = items;
+        _isLoading = false;
+        _errorMessage = null;
+      });
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        if (!quiet) _errorMessage = e.message;
+        _isLoading = false;
+      });
+    }
+  }
+
+  Future<void> _openCreate() async {
+    await context.push(AppRoutes.inquiryCreate);
+    if (mounted) _load(quiet: true);
+  }
+
+  Future<void> _openDetail(InquirySummary item) async {
+    await context.push('${AppRoutes.inquiryDetail}?id=${item.id}');
+    if (mounted) _load(quiet: true);
+  }
+
+  // 💡 상태별 배경 · 글자 색 (서버의 해결됨 상태도 포함)
+  ({Color bg, Color text}) _statusStyle(String status) {
+    switch (status) {
+      case '검토 중':
+        return (bg: const Color(0xFFEFF6FF), text: const Color(0xFF3182F6));
+      case '답변 완료':
+        return (bg: const Color(0xFFECFDF5), text: const Color(0xFF10B981));
+      case '해결됨':
+        return (bg: const Color(0xFFE0F2FE), text: const Color(0xFF0369A1));
+      case '반려':
+        return (bg: const Color(0xFFFFF1F2), text: const Color(0xFFF43F5E));
+      default: // 접수
+        return (bg: const Color(0xFFF1F5F9), text: const Color(0xFF64748B));
+    }
+  }
+
+  String _dateLabel(DateTime? d) => d == null ? '' : _mdFmt.format(d);
 
   @override
   Widget build(BuildContext context) {
@@ -133,7 +132,7 @@ class _MyInquiryListScreenState extends State<MyInquiryListScreen> {
                     ),
                   ),
                   InkWell(
-                    onTap: () => context.push(AppRoutes.inquiryCreate),
+                    onTap: _openCreate,
                     borderRadius: BorderRadius.circular(20),
                     child: Container(
                       padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 9),
@@ -157,85 +156,105 @@ class _MyInquiryListScreenState extends State<MyInquiryListScreen> {
 
             // 2. 본문 스크롤 영역
             Expanded(
-              child: SingleChildScrollView(
-                padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text(
-                      '보낸 의견, 여기서 확인해요.',
-                      style: TextStyle(
-                        fontSize: 22,
-                        fontWeight: FontWeight.w800,
-                        color: textDark,
-                        letterSpacing: -0.5,
+              child: RefreshIndicator(
+                onRefresh: () => _load(quiet: true),
+                child: SingleChildScrollView(
+                  physics: const AlwaysScrollableScrollPhysics(),
+                  padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        '보낸 의견, 여기서 확인해요.',
+                        style: TextStyle(
+                          fontSize: 22,
+                          fontWeight: FontWeight.w800,
+                          color: textDark,
+                          letterSpacing: -0.5,
+                        ),
                       ),
-                    ),
-                    const SizedBox(height: 6),
-                    const Text(
-                      '내가 제출한 문의와 건의만 볼 수 있어요.',
-                      style: TextStyle(
-                        fontSize: 13,
-                        color: textSub,
+                      const SizedBox(height: 6),
+                      const Text(
+                        '내가 제출한 문의와 건의만 볼 수 있어요.',
+                        style: TextStyle(
+                          fontSize: 13,
+                          color: textSub,
+                        ),
                       ),
-                    ),
-                    const SizedBox(height: 16),
+                      const SizedBox(height: 16),
 
-                    // 처리 흐름 바 카드
-                    Container(
-                      width: double.infinity,
-                      padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
-                      decoration: BoxDecoration(
-                        color: Colors.white,
-                        borderRadius: BorderRadius.circular(20),
-                        boxShadow: const [
-                          BoxShadow(
-                            color: Color.fromRGBO(0, 0, 0, 0.02),
-                            blurRadius: 8,
-                            offset: Offset(0, 2),
-                          ),
-                        ],
-                      ),
-                      child: Row(
-                        children: [
-                          const Text(
-                            '처리 흐름',
-                            style: TextStyle(
-                              fontSize: 14,
-                              fontWeight: FontWeight.bold,
-                              color: textDark,
+                      // 처리 흐름 바 카드
+                      Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
+                        decoration: BoxDecoration(
+                          color: Colors.white,
+                          borderRadius: BorderRadius.circular(20),
+                          boxShadow: const [
+                            BoxShadow(
+                              color: Color.fromRGBO(0, 0, 0, 0.02),
+                              blurRadius: 8,
+                              offset: Offset(0, 2),
                             ),
-                          ),
-                          const Spacer(),
-                          _buildFlowChip('접수', const Color(0xFFF1F5F9), textSub),
-                          const Padding(
-                            padding: EdgeInsets.symmetric(horizontal: 4),
-                            child: Icon(Icons.arrow_forward_rounded, size: 12, color: Color(0xFFCBD5E1)),
-                          ),
-                          _buildFlowChip('검토 중', const Color(0xFFEFF6FF), primaryBlue),
-                          const Padding(
-                            padding: EdgeInsets.symmetric(horizontal: 4),
-                            child: Icon(Icons.arrow_forward_rounded, size: 12, color: Color(0xFFCBD5E1)),
-                          ),
-                          _buildFlowChip('답변 완료', const Color(0xFFECFDF5), const Color(0xFF10B981)),
-                        ],
+                          ],
+                        ),
+                        child: Row(
+                          children: [
+                            const Text(
+                              '처리 흐름',
+                              style: TextStyle(
+                                fontSize: 14,
+                                fontWeight: FontWeight.bold,
+                                color: textDark,
+                              ),
+                            ),
+                            const Spacer(),
+                            _buildFlowChip('접수', const Color(0xFFF1F5F9), textSub),
+                            const Padding(
+                              padding: EdgeInsets.symmetric(horizontal: 4),
+                              child: Icon(Icons.arrow_forward_rounded, size: 12, color: Color(0xFFCBD5E1)),
+                            ),
+                            _buildFlowChip('검토 중', const Color(0xFFEFF6FF), primaryBlue),
+                            const Padding(
+                              padding: EdgeInsets.symmetric(horizontal: 4),
+                              child: Icon(Icons.arrow_forward_rounded, size: 12, color: Color(0xFFCBD5E1)),
+                            ),
+                            _buildFlowChip('답변 완료', const Color(0xFFECFDF5), const Color(0xFF10B981)),
+                          ],
+                        ),
                       ),
-                    ),
-                    const SizedBox(height: 16),
+                      const SizedBox(height: 16),
 
-                    // 문의 목록
-                    ListView.separated(
-                      shrinkWrap: true,
-                      physics: const NeverScrollableScrollPhysics(),
-                      itemCount: _inquiries.length,
-                      separatorBuilder: (context, index) => const SizedBox(height: 14),
-                      itemBuilder: (context, index) {
-                        final item = _inquiries[index];
-                        return _buildInquiryCard(item);
-                      },
-                    ),
-                    const SizedBox(height: 30),
-                  ],
+                      // 문의 목록
+                      if (_isLoading)
+                        const SkeletonList(count: 3)
+                      else if (_errorMessage != null)
+                        ErrorStateView(
+                          title: '문의를 불러오지 못했어요',
+                          message: _errorMessage,
+                          onRetry: _load,
+                          onBack: () => context.pop(),
+                        )
+                      else if (_inquiries.isEmpty)
+                          const EmptyStateView(
+                            icon: Icons.mail_outline_rounded,
+                            title: '아직 보낸 문의가 없어요',
+                            description: '담당 부서에 전달하고 싶은 의견을 새 문의로 남겨 보세요.',
+                          )
+                        else
+                          ListView.separated(
+                            shrinkWrap: true,
+                            physics: const NeverScrollableScrollPhysics(),
+                            itemCount: _inquiries.length,
+                            separatorBuilder: (context, index) => const SizedBox(height: 14),
+                            itemBuilder: (context, index) {
+                              final item = _inquiries[index];
+                              return _buildInquiryCard(item);
+                            },
+                          ),
+                      const SizedBox(height: 30),
+                    ],
+                  ),
                 ),
               ),
             ),
@@ -263,16 +282,14 @@ class _MyInquiryListScreenState extends State<MyInquiryListScreen> {
     );
   }
 
-  Widget _buildInquiryCard(InquiryItemModel item) {
+  Widget _buildInquiryCard(InquirySummary item) {
     const textDark = Color(0xFF111827);
     const textSub = Color(0xFF64748B);
     const textLightGrey = Color(0xFF94A3B8);
+    final style = _statusStyle(item.status);
 
     return InkWell(
-      onTap: () {
-        final isRejected = item.status == InquiryStatus.rejected;
-        context.push(AppRoutes.inquiryDetail, extra: isRejected);
-      },
+      onTap: () => _openDetail(item),
       borderRadius: BorderRadius.circular(24),
       child: Container(
         width: double.infinity,
@@ -294,25 +311,27 @@ class _MyInquiryListScreenState extends State<MyInquiryListScreen> {
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                Text(
-                  '${item.department} · ${item.date} · ${item.isAnonymous ? "익명" : "실명"}',
-                  style: const TextStyle(
-                    fontSize: 12,
-                    color: textLightGrey,
+                Expanded(
+                  child: Text(
+                    '${item.dept} · ${_dateLabel(item.createdAt)} · ${item.anonymous ? "익명" : "실명"}',
+                    style: const TextStyle(
+                      fontSize: 12,
+                      color: textLightGrey,
+                    ),
                   ),
                 ),
                 Container(
                   padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
                   decoration: BoxDecoration(
-                    color: item.status.bgColor,
+                    color: style.bg,
                     borderRadius: BorderRadius.circular(12),
                   ),
                   child: Text(
-                    item.status.label,
+                    item.status,
                     style: TextStyle(
                       fontSize: 12,
                       fontWeight: FontWeight.bold,
-                      color: item.status.textColor,
+                      color: style.text,
                     ),
                   ),
                 ),
@@ -327,10 +346,12 @@ class _MyInquiryListScreenState extends State<MyInquiryListScreen> {
                 color: textDark,
               ),
             ),
-            if (item.content != null) ...[
+            if (item.body.isNotEmpty) ...[
               const SizedBox(height: 8),
               Text(
-                item.content!,
+                item.body,
+                maxLines: 3,
+                overflow: TextOverflow.ellipsis,
                 style: const TextStyle(
                   fontSize: 13,
                   color: textSub,
@@ -338,7 +359,7 @@ class _MyInquiryListScreenState extends State<MyInquiryListScreen> {
                 ),
               ),
             ],
-            if (item.answerContent != null) ...[
+            if (item.answer.isNotEmpty) ...[
               const SizedBox(height: 14),
               Container(
                 width: double.infinity,
@@ -362,7 +383,7 @@ class _MyInquiryListScreenState extends State<MyInquiryListScreen> {
                         ),
                         const SizedBox(width: 8),
                         Text(
-                          '${item.answerAuthor} 답변 · ${item.answerDate}',
+                          '${item.answeredBy.isEmpty ? item.dept : item.answeredBy} 답변 · ${_dateLabel(item.answeredAt)}',
                           style: const TextStyle(
                             fontSize: 12,
                             fontWeight: FontWeight.bold,
@@ -373,7 +394,9 @@ class _MyInquiryListScreenState extends State<MyInquiryListScreen> {
                     ),
                     const SizedBox(height: 8),
                     Text(
-                      item.answerContent!,
+                      item.answer,
+                      maxLines: 3,
+                      overflow: TextOverflow.ellipsis,
                       style: const TextStyle(
                         fontSize: 13,
                         color: textDark,

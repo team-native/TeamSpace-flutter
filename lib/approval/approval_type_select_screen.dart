@@ -1,9 +1,304 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
+import 'package:intl/intl.dart';
+import 'package:teamspace/core/network/api_exception.dart';
+import 'package:teamspace/data/models/approval_models.dart';
+import 'package:teamspace/data/repositories/approval_repository.dart';
+import 'package:teamspace/data/repositories/home_repository.dart';
+import 'package:teamspace/data/repositories/project_repository.dart';
 import '../app/router.dart';
+import 'approval_form_widgets.dart';
 
-class ApprovalTypeSelectScreen extends StatelessWidget {
+/// 결재 올리기
+/// - POST  /approvals          새 결재 제출 · 임시 저장('작성 중')
+/// - PATCH /approvals/{id}     작성 중 · 반려된 내 결재 고치기 (extra 로 Approval 을 받으면 수정 모드)
+/// - GET   /people             결재선 미리보기 (실제 결재선은 제출할 때 서버가 정해요)
+/// - GET   /projects           프로젝트 선택 목록
+class ApprovalTypeSelectScreen extends StatefulWidget {
   const ApprovalTypeSelectScreen({super.key});
+
+  @override
+  State<ApprovalTypeSelectScreen> createState() => _ApprovalTypeSelectScreenState();
+}
+
+class _ApprovalTypeSelectScreenState extends State<ApprovalTypeSelectScreen> {
+  static final DateFormat _dayFmt = DateFormat('yyyy.MM.dd');
+  static final DateFormat _apiFmt = DateFormat('yyyy-MM-dd');
+
+  static const List<String> _expenseTypes = ['물품 구매', '도구 · 구독', '외부 비용', '교육 · 행사', '기타'];
+  static const List<String> _staffRoles = ['iOS', 'FE', 'BE', 'Design', 'Dev'];
+  static const List<String> _projectRequestTypes = ['인원 조정', '일정 변경', '예산', '기타'];
+  static const List<String> _operationCategories = ['물품 · 시설', '행사', '예산', '규정 · 기타'];
+  static const List<String> _departments = ['NativeOps', 'PMO', 'FA', 'Design', 'Dev'];
+  static const String _pickProject = '프로젝트 선택';
+
+  final ValueNotifier<List<Map<String, dynamic>>?> _people = ValueNotifier(null);
+  final ValueNotifier<bool> _peopleFailed = ValueNotifier(false);
+  List<String> _projects = const [];
+  String _myId = '';
+  bool _started = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadBasics();
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_started) return;
+    _started = true;
+    // 결재 상세의 '수정하기'에서 왔으면 그 결재의 시트를 바로 열어요
+    final extra = GoRouterState.of(context).extra;
+    if (extra is Approval) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _openFor(extra);
+      });
+    }
+  }
+
+  @override
+  void dispose() {
+    _people.dispose();
+    _peopleFailed.dispose();
+    super.dispose();
+  }
+
+  // ───────────────────────── 데이터 ─────────────────────────
+
+  Future<void> _loadBasics() async {
+    try {
+      _myId = '${(await HomeRepository.instance.getMe()).id}';
+    } on ApiException {
+      // 내 id 를 몰라도 제출은 돼요 (미리보기에서만 쓰여요)
+    }
+    await Future.wait([_loadPeople(), _loadProjects()]);
+  }
+
+  Future<void> _loadPeople() async {
+    try {
+      final people = await ApprovalLinePreview.loadPeople();
+      if (mounted) _people.value = people;
+    } on ApiException {
+      if (mounted) _peopleFailed.value = true;
+    }
+  }
+
+  Future<void> _loadProjects() async {
+    try {
+      final page = await ProjectRepository.instance.getProjects(limit: 50);
+      final names = <String>[];
+      for (final p in page.items) {
+        if (!p.isCompleted && p.name.isNotEmpty && !names.contains(p.name)) names.add(p.name);
+      }
+      if (mounted) setState(() => _projects = names);
+    } on ApiException {
+      // 프로젝트 목록이 없으면 선택할 때 알려줘요
+    }
+  }
+
+  void _openFor(Approval a) {
+    if (!a.canEdit) {
+      _toast('작성 중이거나 반려된 결재만 고칠 수 있어요.');
+      return;
+    }
+    switch (a.kind) {
+      case ApprovalKind.staffing:
+        _showStaffingRequestSheet(context, edit: a);
+      case ApprovalKind.project:
+        _showProjectRequestSheet(context, edit: a);
+      case ApprovalKind.operations:
+        _showOperationsRequestSheet(context, edit: a);
+      case ApprovalKind.internal:
+        _showGeneralDocumentSheet(context, edit: a);
+      default:
+        _showExpenseApprovalSheet(context, edit: a);
+    }
+  }
+
+  /// 저장 · 제출. 성공하면 true (시트를 닫고 완료 팝업 · 안내를 띄워요)
+  Future<bool> _save(
+      BuildContext sheetContext, {
+        required Map<String, dynamic> body,
+        required bool draft,
+        Approval? edit,
+      }) async {
+    final repo = ApprovalRepository.instance;
+    var id = '';
+    var reviewer = '';
+    try {
+      if (edit != null) {
+        // PATCH 는 정해진 항목만 받아서 kind 는 빼요
+        final changes = Map<String, dynamic>.from(body)..remove('kind');
+        final updated = draft
+            ? await repo.update(edit.id, {...changes, 'status': ApprovalStatus.draft})
+            : await repo.update(edit.id, changes, submit: true);
+        id = edit.id;
+        reviewer = updated.currentStep?.who ?? '';
+      } else {
+        final created = await repo.create(body, draft: draft);
+        id = created.id;
+        if (!draft) {
+          try {
+            reviewer = (await repo.getApproval(id)).currentStep?.who ?? '';
+          } on ApiException {
+            // 담당자 이름은 미리보기로 대신해요
+          }
+        }
+      }
+    } on ApiException catch (e) {
+      if (sheetContext.mounted) showApprovalToast(sheetContext, e.message);
+      return false;
+    }
+
+    if (sheetContext.mounted) Navigator.pop(sheetContext);
+    if (!mounted) return true;
+
+    if (draft) {
+      _toast('임시 저장했어요. 내 결재의 \'작성 중\'에서 이어서 쓸 수 있어요.');
+      if (edit != null) _close();
+      return true;
+    }
+    if (reviewer.isEmpty) {
+      final people = _people.value;
+      final preview = people == null
+          ? const <ApprovalLineMember>[]
+          : ApprovalLinePreview.compute(
+        people: people,
+        kind: '${body['kind'] ?? edit?.kind ?? ''}',
+        amount: body['amount'] is int ? body['amount'] as int : 0,
+        myId: _myId,
+      );
+      reviewer = preview.isEmpty ? '결재 담당자' : preview.first.name;
+    }
+    _showApprovalSuccessDialog(context, reviewerName: reviewer, approvalId: id, fromEdit: edit != null);
+    return true;
+  }
+
+  // ───────────────────────── 공통 ─────────────────────────
+
+  void _toast(String message) {
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  void _close() {
+    if (context.canPop()) {
+      context.pop(true);
+    } else {
+      context.go(AppRoutes.approvalList);
+    }
+  }
+
+  /// 새로 올린 결재 상세로 (결재 올리기 화면은 닫아요)
+  void _openDetail(String id) {
+    final router = GoRouter.of(context);
+    if (router.canPop()) {
+      router.pop(true);
+    } else {
+      router.go(AppRoutes.approvalList);
+    }
+    router.push(AppRoutes.approvalDetail, extra: id);
+  }
+
+  DateTime _defaultDate(int addDays) {
+    final now = DateTime.now();
+    return DateTime(now.year, now.month, now.day).add(Duration(days: addDays));
+  }
+
+  DateTime? _parseDate(String? v) {
+    final s = (v ?? '').trim();
+    if (s.isEmpty) return null;
+    return DateTime.tryParse(s) ?? DateTime.tryParse(s.replaceAll('.', '-'));
+  }
+
+  /// 시트의 controller 는 닫히는 애니메이션이 끝난 뒤 정리해요
+  void _disposeLater(List<TextEditingController> controllers) {
+    Future.delayed(const Duration(milliseconds: 500), () {
+      for (final c in controllers) {
+        c.dispose();
+      }
+    });
+  }
+
+  /// 제출 전 확인 — 비었으면 시트 위에 안내하고 false
+  bool _require(BuildContext sheetContext, bool ok, String message) {
+    if (!ok) showApprovalToast(sheetContext, message);
+    return ok;
+  }
+
+  /// 프로젝트 선택 팝업
+  Future<String?> _pickProjectName(BuildContext sheetContext, String current) async {
+    if (_projects.isEmpty) {
+      showApprovalToast(sheetContext, '선택할 수 있는 프로젝트가 없어요.');
+      return null;
+    }
+    return showApprovalOptionPicker(sheetContext, _projects, current);
+  }
+
+  /// 결재선 미리보기 (금액이 바뀌면 같이 바뀌어요)
+  Widget _linePreview(String kind, {TextEditingController? amount, bool vertical = false}) {
+    return ListenableBuilder(
+      listenable: Listenable.merge([_people, _peopleFailed, if (amount != null) amount]),
+      builder: (context, _) {
+        final people = _people.value;
+        if (people == null) {
+          return buildApprovalLineMessage(
+            _peopleFailed.value ? '결재선을 미리 불러오지 못했어요. 제출하면 자동으로 정해져요.' : '결재선을 불러오는 중이에요.',
+          );
+        }
+        final line = ApprovalLinePreview.compute(
+          people: people,
+          kind: kind,
+          amount: amount == null ? 0 : parseAmount(amount.text),
+          myId: _myId,
+        );
+        if (line.isEmpty) {
+          return buildApprovalLineMessage('결재선을 꾸릴 담당자가 없어요. 관리자에게 문의해 주세요.');
+        }
+        if (vertical) {
+          return Column(
+            children: [
+              for (var i = 0; i < line.length; i++) ...[
+                if (i > 0) const SizedBox(height: 8),
+                buildApprovalVerticalLineItem(line[i].name, line[i].role, '${i + 1}차'),
+              ],
+            ],
+          );
+        }
+        return buildApprovalHorizontalLine(line);
+      },
+    );
+  }
+
+  Widget _choiceChips(List<String> options, String selected, ValueChanged<String> onSelected) {
+    return Wrap(
+      spacing: 8,
+      children: options.map((value) {
+        final isSelected = selected == value;
+        return ChoiceChip(
+          label: Text(value),
+          selected: isSelected,
+          selectedColor: const Color(0xFF2F80ED),
+          backgroundColor: const Color(0xFFF1F5F9),
+          labelStyle: TextStyle(
+            fontSize: 13,
+            fontWeight: isSelected ? FontWeight.bold : FontWeight.w500,
+            color: isSelected ? Colors.white : const Color(0xFF4B5563),
+          ),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(20),
+            side: BorderSide.none,
+          ),
+          onSelected: (_) => onSelected(value),
+        );
+      }).toList(),
+    );
+  }
+
+  // ───────────────────────── 화면 ─────────────────────────
 
   @override
   Widget build(BuildContext context) {
@@ -230,9 +525,14 @@ class ApprovalTypeSelectScreen extends StatelessWidget {
   }
 
   // ===========================================================================
-  // 05-7 결재 제출 완료 iOS Alert 팝업 (안전한 이동 로직 적용)
+  // 05-7 결재 제출 완료 iOS Alert 팝업
   // ===========================================================================
-  void _showApprovalSuccessDialog(BuildContext context, {String reviewerName = '이시우'}) {
+  void _showApprovalSuccessDialog(
+      BuildContext context, {
+        required String reviewerName,
+        required String approvalId,
+        bool fromEdit = false,
+      }) {
     showDialog(
       context: context,
       barrierDismissible: false,
@@ -350,18 +650,17 @@ class ApprovalTypeSelectScreen extends StatelessWidget {
                   height: 52,
                   child: Row(
                     children: [
-                      // 내 결재 보기 버튼
+                      // 내 결재 보기 버튼 → 방금 올린 결재 상세
                       Expanded(
                         child: InkWell(
                           onTap: () {
                             Navigator.pop(dialogContext);
                             Future.microtask(() {
-                              if (context.mounted) {
-                                if (context.canPop()) {
-                                  context.pop();
-                                } else {
-                                  context.go(AppRoutes.approvalList);
-                                }
+                              if (!mounted) return;
+                              if (fromEdit) {
+                                _close(); // 결재 상세에서 왔으면 그 화면으로 돌아가요
+                              } else {
+                                _openDetail(approvalId);
                               }
                             });
                           },
@@ -391,13 +690,7 @@ class ApprovalTypeSelectScreen extends StatelessWidget {
                           onTap: () {
                             Navigator.pop(dialogContext);
                             Future.microtask(() {
-                              if (context.mounted) {
-                                if (context.canPop()) {
-                                  context.pop();
-                                } else {
-                                  context.go(AppRoutes.approvalList);
-                                }
-                              }
+                              if (mounted) _close();
                             });
                           },
                           borderRadius: const BorderRadius.only(
@@ -429,9 +722,28 @@ class ApprovalTypeSelectScreen extends StatelessWidget {
   // ===========================================================================
   // 05-5 비용 승인 요청 시트
   // ===========================================================================
-  void _showExpenseApprovalSheet(BuildContext context) {
-    String expenseType = '물품 구매';
-    String scheduledDate = '2026.10.20';
+  void _showExpenseApprovalSheet(BuildContext context, {Approval? edit}) {
+    final initialType = edit == null ? '' : (edit.costType.isNotEmpty ? edit.costType : edit.type);
+    String expenseType = initialType.isNotEmpty ? initialType : '물품 구매';
+    DateTime scheduledDate = _parseDate(edit?.useDate) ?? _defaultDate(7);
+    final projectController = TextEditingController(text: edit?.project ?? '');
+    final titleController = TextEditingController(text: edit?.title ?? '');
+    final amountController = TextEditingController(
+      text: edit != null && edit.amountValue > 0 ? formatAmount(edit.amountValue) : '',
+    );
+    final reasonController = TextEditingController(text: edit?.reason ?? '');
+    String? working; // 'draft' · 'submit'
+
+    Map<String, dynamic> body() => {
+      'kind': ApprovalKind.expense,
+      'type': expenseType,
+      'costType': expenseType,
+      'title': titleController.text.trim(),
+      'project': projectController.text.trim(),
+      'amount': parseAmount(amountController.text),
+      'useDate': _apiFmt.format(scheduledDate),
+      'reason': reasonController.text.trim(),
+    };
 
     showModalBottomSheet(
       context: context,
@@ -440,7 +752,19 @@ class ApprovalTypeSelectScreen extends StatelessWidget {
       builder: (context) {
         return StatefulBuilder(
           builder: (context, setState) {
-            return _BottomSheetWrapper(
+            Future<void> submit(bool draft) async {
+              FocusScope.of(context).unfocus();
+              if (!draft &&
+                  !(_require(context, titleController.text.trim().isNotEmpty, '요청 내용을 적어 주세요.') &&
+                      _require(context, parseAmount(amountController.text) > 0, '요청 금액을 입력해 주세요.'))) {
+                return;
+              }
+              setState(() => working = draft ? 'draft' : 'submit');
+              final ok = await _save(context, body: body(), draft: draft, edit: edit);
+              if (!ok && context.mounted) setState(() => working = null);
+            }
+
+            return ApprovalSheetWrapper(
               title: '비용 승인 요청',
               subtitle: '제출하면 결재선 순서대로 검토가 시작돼요.',
               child: Column(
@@ -449,58 +773,54 @@ class ApprovalTypeSelectScreen extends StatelessWidget {
                   Row(
                     children: [
                       Expanded(
-                        child: _buildFormField(
+                        child: buildApprovalFormField(
                           label: '비용 유형',
-                          child: _buildDropdownSelector(
+                          child: buildApprovalDropdownSelector(
                             expenseType,
-                            onTap: () {
-                              _showExpenseTypePicker(context, expenseType, (selected) {
-                                setState(() => expenseType = selected);
-                              });
+                            onTap: () async {
+                              final selected = await showApprovalOptionPicker(context, _expenseTypes, expenseType);
+                              if (selected != null && context.mounted) setState(() => expenseType = selected);
                             },
                           ),
                         ),
                       ),
                       const SizedBox(width: 12),
                       Expanded(
-                        child: _buildFormField(
+                        child: buildApprovalFormField(
                           label: '프로젝트 · 사용처',
-                          child: _buildTextField('예) Book-on'),
+                          child: buildApprovalTextField(projectController, '예) Book-on'),
                         ),
                       ),
                     ],
                   ),
                   const SizedBox(height: 16),
-                  _buildFormField(
+                  buildApprovalFormField(
                     label: '요청 내용',
-                    child: _buildTextField('필요한 물품이나 비용을 적어주세요'),
+                    child: buildApprovalTextField(titleController, '필요한 물품이나 비용을 적어주세요', maxLength: 200),
                   ),
                   const SizedBox(height: 16),
                   Row(
                     children: [
                       Expanded(
-                        child: _buildFormField(
+                        child: buildApprovalFormField(
                           label: '요청 금액',
-                          child: _buildTextField('0 원'),
+                          child: buildApprovalTextField(
+                            amountController,
+                            '0 원',
+                            keyboardType: TextInputType.number,
+                            inputFormatters: [AmountInputFormatter()],
+                          ),
                         ),
                       ),
                       const SizedBox(width: 12),
                       Expanded(
-                        child: _buildFormField(
+                        child: buildApprovalFormField(
                           label: '사용 예정일',
-                          child: _buildDatePickerField(
-                            scheduledDate,
-                            onTap: () {
-                              _showDatePickerDialog(
-                                context,
-                                DateTime(2026, 10, 20),
-                                    (date) {
-                                  setState(() {
-                                    scheduledDate =
-                                    '${date.year}.${date.month.toString().padLeft(2, '0')}.${date.day.toString().padLeft(2, '0')}';
-                                  });
-                                },
-                              );
+                          child: buildApprovalDatePickerField(
+                            _dayFmt.format(scheduledDate),
+                            onTap: () async {
+                              final date = await showApprovalDatePicker(context, scheduledDate);
+                              if (date != null && context.mounted) setState(() => scheduledDate = date);
                             },
                           ),
                         ),
@@ -508,42 +828,39 @@ class ApprovalTypeSelectScreen extends StatelessWidget {
                     ],
                   ),
                   const SizedBox(height: 16),
-                  _buildFormField(
+                  buildApprovalFormField(
                     label: '요청 사유',
-                    child: _buildTextArea('목적과 필요한 이유를 알려주세요', maxLines: 3),
+                    child: buildApprovalTextArea(reasonController, '목적과 필요한 이유를 알려주세요', maxLines: 3),
                   ),
                   const SizedBox(height: 16),
-                  _buildFormField(
+                  buildApprovalFormField(
                     label: '첨부 (견적서 · 영수증)',
-                    child: _buildAddFileButton(),
+                    child: buildApprovalAddFileButton(
+                      onTap: () => showApprovalToast(context, '파일 첨부는 준비 중이에요.'),
+                    ),
                   ),
                   const SizedBox(height: 16),
-                  _buildFormField(
+                  buildApprovalFormField(
                     label: '결재선',
-                    child: _buildHorizontalApprovalLine([
-                      {'name': '안율', 'role': 'OL'},
-                      {'name': '김민준', 'role': 'FA'},
-                      {'name': '이시우', 'role': 'Leader'},
-                    ]),
+                    child: _linePreview(ApprovalKind.expense, amount: amountController),
                   ),
                   const SizedBox(height: 24),
                   Row(
                     children: [
                       Expanded(
-                        child: _buildActionButton(
+                        child: buildApprovalActionButton(
                           text: '임시 저장',
                           isSecondary: true,
-                          onPressed: () => Navigator.pop(context),
+                          isLoading: working == 'draft',
+                          onPressed: working != null ? null : () => submit(true),
                         ),
                       ),
                       const SizedBox(width: 12),
                       Expanded(
-                        child: _buildActionButton(
+                        child: buildApprovalActionButton(
                           text: '결재 요청 제출',
-                          onPressed: () {
-                            Navigator.pop(context);
-                            _showApprovalSuccessDialog(context, reviewerName: '이시우');
-                          },
+                          isLoading: working == 'submit',
+                          onPressed: working != null ? null : () => submit(false),
                         ),
                       ),
                     ],
@@ -554,16 +871,35 @@ class ApprovalTypeSelectScreen extends StatelessWidget {
           },
         );
       },
-    );
+    ).whenComplete(() => _disposeLater([projectController, titleController, amountController, reasonController]));
   }
 
   // ===========================================================================
   // 05-6 프로젝트 인력 지원 시트
   // ===========================================================================
-  void _showStaffingRequestSheet(BuildContext context) {
-    int count = 1;
-    String selectedRole = 'iOS';
-    String periodText = '11월 ~ 12월';
+  void _showStaffingRequestSheet(BuildContext context, {Approval? edit}) {
+    final firstStaff = edit?.staff.entries.firstOrNull;
+    int count = (firstStaff?.value ?? 0) > 0 ? firstStaff!.value : 1;
+    String selectedRole = firstStaff?.key ?? 'iOS';
+    final now = DateTime.now();
+    final nextMonth = DateTime(now.year, now.month + 1);
+    String periodText = (edit?.period ?? '').isNotEmpty ? edit!.period : '${now.month}월 ~ ${nextMonth.month}월';
+    DateTime periodStart = _defaultDate(0);
+    String project = (edit?.project ?? '').isNotEmpty
+        ? edit!.project
+        : (_projects.isNotEmpty ? _projects.first : _pickProject);
+    final reasonController = TextEditingController(text: edit?.reason ?? '');
+    var working = false;
+
+    Map<String, dynamic> body() => {
+      'kind': ApprovalKind.staffing,
+      'type': '$selectedRole $count명',
+      'title': '$project 프로젝트 인력 지원',
+      'project': project,
+      'staff': {selectedRole: count},
+      'period': periodText,
+      'reason': reasonController.text.trim(),
+    };
 
     showModalBottomSheet(
       context: context,
@@ -572,47 +908,40 @@ class ApprovalTypeSelectScreen extends StatelessWidget {
       builder: (context) {
         return StatefulBuilder(
           builder: (context, setState) {
-            return _BottomSheetWrapper(
+            Future<void> submit() async {
+              FocusScope.of(context).unfocus();
+              if (!_require(context, project != _pickProject, '프로젝트를 선택해 주세요.')) return;
+              setState(() => working = true);
+              final ok = await _save(context, body: body(), draft: false, edit: edit);
+              if (!ok && context.mounted) setState(() => working = false);
+            }
+
+            return ApprovalSheetWrapper(
               title: '프로젝트 인력 지원',
               subtitle: '진행 중인 프로젝트에 필요한 직군과 인원을 요청해요.',
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  _buildFormField(
+                  buildApprovalFormField(
                     label: '프로젝트',
-                    child: _buildDropdownSelector('Book-on'),
+                    child: buildApprovalDropdownSelector(
+                      project,
+                      onTap: () async {
+                        final selected = await _pickProjectName(context, project);
+                        if (selected != null && context.mounted) setState(() => project = selected);
+                      },
+                    ),
                   ),
                   const SizedBox(height: 16),
-                  _buildFormField(
+                  buildApprovalFormField(
                     label: '필요 직군',
-                    child: Wrap(
-                      spacing: 8,
-                      children: ['iOS', 'FE', 'BE', 'Design', 'Dev'].map((role) {
-                        final isSelected = selectedRole == role;
-                        return ChoiceChip(
-                          label: Text(role),
-                          selected: isSelected,
-                          selectedColor: const Color(0xFF2F80ED),
-                          backgroundColor: const Color(0xFFF1F5F9),
-                          labelStyle: TextStyle(
-                            fontSize: 13,
-                            fontWeight: isSelected ? FontWeight.bold : FontWeight.w500,
-                            color: isSelected ? Colors.white : const Color(0xFF4B5563),
-                          ),
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(20),
-                            side: BorderSide.none,
-                          ),
-                          onSelected: (_) => setState(() => selectedRole = role),
-                        );
-                      }).toList(),
-                    ),
+                    child: _choiceChips(_staffRoles, selectedRole, (role) => setState(() => selectedRole = role)),
                   ),
                   const SizedBox(height: 16),
                   Row(
                     children: [
                       Expanded(
-                        child: _buildFormField(
+                        child: buildApprovalFormField(
                           label: '인원',
                           child: Container(
                             height: 48,
@@ -639,7 +968,9 @@ class ApprovalTypeSelectScreen extends StatelessWidget {
                                   ),
                                 ),
                                 GestureDetector(
-                                  onTap: () => setState(() => count++),
+                                  onTap: () {
+                                    if (count < 20) setState(() => count++);
+                                  },
                                   child: const Icon(Icons.add, size: 18, color: Color(0xFF6B7280)),
                                 ),
                               ],
@@ -649,20 +980,18 @@ class ApprovalTypeSelectScreen extends StatelessWidget {
                       ),
                       const SizedBox(width: 12),
                       Expanded(
-                        child: _buildFormField(
+                        child: buildApprovalFormField(
                           label: '투입 기간',
-                          child: _buildDatePickerField(
+                          child: buildApprovalDatePickerField(
                             periodText,
-                            onTap: () {
-                              _showDatePickerDialog(
-                                context,
-                                DateTime(2026, 11, 1),
-                                    (date) {
-                                  setState(() {
-                                    periodText = '${date.month}월 ${date.day}일 시작';
-                                  });
-                                },
-                              );
+                            onTap: () async {
+                              final date = await showApprovalDatePicker(context, periodStart);
+                              if (date != null && context.mounted) {
+                                setState(() {
+                                  periodStart = date;
+                                  periodText = '${date.month}월 ${date.day}일 시작';
+                                });
+                              }
                             },
                           ),
                         ),
@@ -670,28 +999,22 @@ class ApprovalTypeSelectScreen extends StatelessWidget {
                     ],
                   ),
                   const SizedBox(height: 16),
-                  _buildFormField(
+                  buildApprovalFormField(
                     label: '요청 사유',
-                    child: _buildTextArea('목적과 필요한 이유를 알려주세요', maxLines: 3),
+                    child: buildApprovalTextArea(reasonController, '목적과 필요한 이유를 알려주세요', maxLines: 3),
                   ),
                   const SizedBox(height: 16),
-                  _buildFormField(
+                  buildApprovalFormField(
                     label: '결재선',
-                    child: _buildHorizontalApprovalLine([
-                      {'name': '안율', 'role': 'OL'},
-                      {'name': '김민준', 'role': 'FA'},
-                      {'name': '이시우', 'role': 'Leader'},
-                    ]),
+                    child: _linePreview(ApprovalKind.staffing),
                   ),
                   const SizedBox(height: 24),
                   SizedBox(
                     width: double.infinity,
-                    child: _buildActionButton(
+                    child: buildApprovalActionButton(
                       text: '결재 요청 제출',
-                      onPressed: () {
-                        Navigator.pop(context);
-                        _showApprovalSuccessDialog(context, reviewerName: '이시우');
-                      },
+                      isLoading: working,
+                      onPressed: working ? null : submit,
                     ),
                   ),
                 ],
@@ -700,16 +1023,39 @@ class ApprovalTypeSelectScreen extends StatelessWidget {
           },
         );
       },
-    );
+    ).whenComplete(() => _disposeLater([reasonController]));
   }
 
   // ===========================================================================
   // 05-12 프로젝트 관련 요청서 시트
   // ===========================================================================
-  void _showProjectRequestSheet(BuildContext context) {
-    String selectedType = '인원 조정';
-    String targetDate = '2026.10.23';
-    String periodRange = '10.23 ~ 10.31';
+  void _showProjectRequestSheet(BuildContext context, {Approval? edit}) {
+    String selectedType = _projectRequestTypes.contains(edit?.type) ? edit!.type : '인원 조정';
+    DateTime targetDate = _parseDate(edit?.useDate) ?? _defaultDate(7);
+    final today = _defaultDate(0);
+    final periodEnd = _defaultDate(8);
+    String periodRange = (edit?.period ?? '').isNotEmpty
+        ? edit!.period
+        : '${today.month}.${today.day} ~ ${periodEnd.month}.${periodEnd.day}';
+    DateTime periodStart = today;
+    String project = (edit?.project ?? '').isNotEmpty
+        ? edit!.project
+        : (_projects.isNotEmpty ? _projects.first : _pickProject);
+    final details = edit?.raw['details'];
+    final peopleController = TextEditingController(text: details is Map ? '${details['people'] ?? ''}' : '');
+    final reasonController = TextEditingController(text: edit?.reason ?? '');
+    String? working;
+
+    Map<String, dynamic> body() => {
+      'kind': ApprovalKind.project,
+      'type': selectedType,
+      'title': '$project $selectedType 요청',
+      'project': project,
+      'useDate': _apiFmt.format(targetDate),
+      'period': periodRange,
+      'reason': reasonController.text.trim(),
+      'details': {'people': peopleController.text.trim()},
+    };
 
     showModalBottomSheet(
       context: context,
@@ -718,7 +1064,19 @@ class ApprovalTypeSelectScreen extends StatelessWidget {
       builder: (context) {
         return StatefulBuilder(
           builder: (context, setState) {
-            return _BottomSheetWrapper(
+            Future<void> submit(bool draft) async {
+              FocusScope.of(context).unfocus();
+              if (!draft &&
+                  !(_require(context, project != _pickProject, '프로젝트를 선택해 주세요.') &&
+                      _require(context, reasonController.text.trim().isNotEmpty, '요청 상세 · 사유를 적어 주세요.'))) {
+                return;
+              }
+              setState(() => working = draft ? 'draft' : 'submit');
+              final ok = await _save(context, body: body(), draft: draft, edit: edit);
+              if (!ok && context.mounted) setState(() => working = null);
+            }
+
+            return ApprovalSheetWrapper(
               title: '프로젝트 관련 요청서',
               subtitle: '프로젝트 PM과 운영 리드가 순서대로 검토해요.',
               child: Column(
@@ -727,28 +1085,26 @@ class ApprovalTypeSelectScreen extends StatelessWidget {
                   Row(
                     children: [
                       Expanded(
-                        child: _buildFormField(
+                        child: buildApprovalFormField(
                           label: '프로젝트',
-                          child: _buildDropdownSelector('Book-on'),
+                          child: buildApprovalDropdownSelector(
+                            project,
+                            onTap: () async {
+                              final selected = await _pickProjectName(context, project);
+                              if (selected != null && context.mounted) setState(() => project = selected);
+                            },
+                          ),
                         ),
                       ),
                       const SizedBox(width: 12),
                       Expanded(
-                        child: _buildFormField(
+                        child: buildApprovalFormField(
                           label: '희망 반영일',
-                          child: _buildDatePickerField(
-                            targetDate,
-                            onTap: () {
-                              _showDatePickerDialog(
-                                context,
-                                DateTime(2026, 10, 23),
-                                    (date) {
-                                  setState(() {
-                                    targetDate =
-                                    '${date.year}.${date.month.toString().padLeft(2, '0')}.${date.day.toString().padLeft(2, '0')}';
-                                  });
-                                },
-                              );
+                          child: buildApprovalDatePickerField(
+                            _dayFmt.format(targetDate),
+                            onTap: () async {
+                              final date = await showApprovalDatePicker(context, targetDate);
+                              if (date != null && context.mounted) setState(() => targetDate = date);
                             },
                           ),
                         ),
@@ -756,56 +1112,37 @@ class ApprovalTypeSelectScreen extends StatelessWidget {
                     ],
                   ),
                   const SizedBox(height: 16),
-                  _buildFormField(
+                  buildApprovalFormField(
                     label: '요청 종류',
-                    child: Wrap(
-                      spacing: 8,
-                      children: ['인원 조정', '일정 변경', '예산', '기타'].map((type) {
-                        final isSelected = selectedType == type;
-                        return ChoiceChip(
-                          label: Text(type),
-                          selected: isSelected,
-                          selectedColor: const Color(0xFF2F80ED),
-                          backgroundColor: const Color(0xFFF1F5F9),
-                          labelStyle: TextStyle(
-                            fontSize: 13,
-                            fontWeight: isSelected ? FontWeight.bold : FontWeight.w500,
-                            color: isSelected ? Colors.white : const Color(0xFF4B5563),
-                          ),
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(20),
-                            side: BorderSide.none,
-                          ),
-                          onSelected: (_) => setState(() => selectedType = type),
-                        );
-                      }).toList(),
+                    child: _choiceChips(
+                      _projectRequestTypes,
+                      selectedType,
+                          (type) => setState(() => selectedType = type),
                     ),
                   ),
                   const SizedBox(height: 16),
                   Row(
                     children: [
                       Expanded(
-                        child: _buildFormField(
+                        child: buildApprovalFormField(
                           label: '필요 인원',
-                          child: _buildTextField('QA 1명'),
+                          child: buildApprovalTextField(peopleController, 'QA 1명'),
                         ),
                       ),
                       const SizedBox(width: 12),
                       Expanded(
-                        child: _buildFormField(
+                        child: buildApprovalFormField(
                           label: '기간',
-                          child: _buildDatePickerField(
+                          child: buildApprovalDatePickerField(
                             periodRange,
-                            onTap: () {
-                              _showDatePickerDialog(
-                                context,
-                                DateTime(2026, 10, 23),
-                                    (date) {
-                                  setState(() {
-                                    periodRange = '${date.month}.${date.day}부터';
-                                  });
-                                },
-                              );
+                            onTap: () async {
+                              final date = await showApprovalDatePicker(context, periodStart);
+                              if (date != null && context.mounted) {
+                                setState(() {
+                                  periodStart = date;
+                                  periodRange = '${date.month}.${date.day}부터';
+                                });
+                              }
                             },
                           ),
                         ),
@@ -813,42 +1150,43 @@ class ApprovalTypeSelectScreen extends StatelessWidget {
                     ],
                   ),
                   const SizedBox(height: 16),
-                  _buildFormField(
+                  buildApprovalFormField(
                     label: '요청 상세 · 사유',
-                    child: _buildTextArea('10.23 QA 일정에 맞춰 테스트 인원 1명이 더 필요해요.', maxLines: 3),
+                    child: buildApprovalTextArea(
+                      reasonController,
+                      '10.23 QA 일정에 맞춰 테스트 인원 1명이 더 필요해요.',
+                      maxLines: 3,
+                    ),
                   ),
                   const SizedBox(height: 16),
-                  _buildFormField(
+                  buildApprovalFormField(
                     label: '첨부 (선택)',
-                    child: _buildAddFileButton(),
+                    child: buildApprovalAddFileButton(
+                      onTap: () => showApprovalToast(context, '파일 첨부는 준비 중이에요.'),
+                    ),
                   ),
                   const SizedBox(height: 16),
-                  _buildFormField(
+                  buildApprovalFormField(
                     label: '결재선',
-                    child: _buildHorizontalApprovalLine([
-                      {'name': '이시우', 'role': 'PM · Book-on'},
-                      {'name': '양지우', 'role': 'NativeOps'},
-                      {'name': '김민준', 'role': 'Leader'},
-                    ]),
+                    child: _linePreview(ApprovalKind.project),
                   ),
                   const SizedBox(height: 24),
                   Row(
                     children: [
                       Expanded(
-                        child: _buildActionButton(
+                        child: buildApprovalActionButton(
                           text: '임시 저장',
                           isSecondary: true,
-                          onPressed: () => Navigator.pop(context),
+                          isLoading: working == 'draft',
+                          onPressed: working != null ? null : () => submit(true),
                         ),
                       ),
                       const SizedBox(width: 12),
                       Expanded(
-                        child: _buildActionButton(
+                        child: buildApprovalActionButton(
                           text: '결재 요청 제출',
-                          onPressed: () {
-                            Navigator.pop(context);
-                            _showApprovalSuccessDialog(context, reviewerName: '이시우');
-                          },
+                          isLoading: working == 'submit',
+                          onPressed: working != null ? null : () => submit(false),
                         ),
                       ),
                     ],
@@ -859,15 +1197,41 @@ class ApprovalTypeSelectScreen extends StatelessWidget {
           },
         );
       },
-    );
+    ).whenComplete(() => _disposeLater([peopleController, reasonController]));
   }
 
   // ===========================================================================
   // 05-13 운영 관련 요청서 시트
   // ===========================================================================
-  void _showOperationsRequestSheet(BuildContext context) {
-    String selectedCategory = '물품 · 시설';
-    String processDate = '2026.10.30';
+  void _showOperationsRequestSheet(BuildContext context, {Approval? edit}) {
+    String selectedCategory = _operationCategories.contains(edit?.type) ? edit!.type : '물품 · 시설';
+    DateTime processDate = _parseDate(edit?.useDate) ?? _defaultDate(14);
+    String department = (edit?.project ?? '').isNotEmpty ? edit!.project : 'NativeOps';
+    final details = edit?.raw['details'];
+    final amountController = TextEditingController(
+      text: edit != null && edit.amountValue > 0 ? formatAmount(edit.amountValue) : '',
+    );
+    final quantityController = TextEditingController(text: details is Map ? '${details['quantity'] ?? ''}' : '');
+    final reasonController = TextEditingController(text: edit?.reason ?? '');
+    String? working;
+
+    /// 제목 칸이 없어서 사유 첫 줄로 제목을 만들어요 ('물품 · 시설 요청' 대신)
+    String title() {
+      final first = reasonController.text.trim().split('\n').first.trim();
+      if (first.isEmpty) return '$selectedCategory 요청';
+      return first.length > 40 ? '${first.substring(0, 40)}…' : first;
+    }
+
+    Map<String, dynamic> body() => {
+      'kind': ApprovalKind.operations,
+      'type': selectedCategory,
+      'title': title(),
+      'project': department,
+      'useDate': _apiFmt.format(processDate),
+      'amount': parseAmount(amountController.text),
+      'reason': reasonController.text.trim(),
+      'details': {'quantity': quantityController.text.trim()},
+    };
 
     showModalBottomSheet(
       context: context,
@@ -876,7 +1240,17 @@ class ApprovalTypeSelectScreen extends StatelessWidget {
       builder: (context) {
         return StatefulBuilder(
           builder: (context, setState) {
-            return _BottomSheetWrapper(
+            Future<void> submit(bool draft) async {
+              FocusScope.of(context).unfocus();
+              if (!draft && !_require(context, reasonController.text.trim().isNotEmpty, '내용 · 사유를 적어 주세요.')) {
+                return;
+              }
+              setState(() => working = draft ? 'draft' : 'submit');
+              final ok = await _save(context, body: body(), draft: draft, edit: edit);
+              if (!ok && context.mounted) setState(() => working = null);
+            }
+
+            return ApprovalSheetWrapper(
               title: '운영 관련 요청서',
               subtitle: 'NativeOps 검토 후 리더가 최종 승인해요.',
               child: Column(
@@ -885,28 +1259,26 @@ class ApprovalTypeSelectScreen extends StatelessWidget {
                   Row(
                     children: [
                       Expanded(
-                        child: _buildFormField(
+                        child: buildApprovalFormField(
                           label: '담당 부서',
-                          child: _buildDropdownSelector('NativeOps'),
+                          child: buildApprovalDropdownSelector(
+                            department,
+                            onTap: () async {
+                              final selected = await showApprovalOptionPicker(context, _departments, department);
+                              if (selected != null && context.mounted) setState(() => department = selected);
+                            },
+                          ),
                         ),
                       ),
                       const SizedBox(width: 12),
                       Expanded(
-                        child: _buildFormField(
+                        child: buildApprovalFormField(
                           label: '희망 처리일',
-                          child: _buildDatePickerField(
-                            processDate,
-                            onTap: () {
-                              _showDatePickerDialog(
-                                context,
-                                DateTime(2026, 10, 30),
-                                    (date) {
-                                  setState(() {
-                                    processDate =
-                                    '${date.year}.${date.month.toString().padLeft(2, '0')}.${date.day.toString().padLeft(2, '0')}';
-                                  });
-                                },
-                              );
+                          child: buildApprovalDatePickerField(
+                            _dayFmt.format(processDate),
+                            onTap: () async {
+                              final date = await showApprovalDatePicker(context, processDate);
+                              if (date != null && context.mounted) setState(() => processDate = date);
                             },
                           ),
                         ),
@@ -914,86 +1286,75 @@ class ApprovalTypeSelectScreen extends StatelessWidget {
                     ],
                   ),
                   const SizedBox(height: 16),
-                  _buildFormField(
+                  buildApprovalFormField(
                     label: '요청 분류',
-                    child: Wrap(
-                      spacing: 8,
-                      children: ['물품 · 시설', '행사', '예산', '규정 · 기타'].map((cat) {
-                        final isSelected = selectedCategory == cat;
-                        return ChoiceChip(
-                          label: Text(cat),
-                          selected: isSelected,
-                          selectedColor: const Color(0xFF2F80ED),
-                          backgroundColor: const Color(0xFFF1F5F9),
-                          labelStyle: TextStyle(
-                            fontSize: 13,
-                            fontWeight: isSelected ? FontWeight.bold : FontWeight.w500,
-                            color: isSelected ? Colors.white : const Color(0xFF4B5563),
-                          ),
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(20),
-                            side: BorderSide.none,
-                          ),
-                          onSelected: (_) => setState(() => selectedCategory = cat),
-                        );
-                      }).toList(),
+                    child: _choiceChips(
+                      _operationCategories,
+                      selectedCategory,
+                          (cat) => setState(() => selectedCategory = cat),
                     ),
                   ),
                   const SizedBox(height: 16),
                   Row(
                     children: [
                       Expanded(
-                        child: _buildFormField(
+                        child: buildApprovalFormField(
                           label: '예상 금액',
-                          child: _buildTextField('180,000 원'),
+                          child: buildApprovalTextField(
+                            amountController,
+                            '180,000 원',
+                            keyboardType: TextInputType.number,
+                            inputFormatters: [AmountInputFormatter()],
+                          ),
                         ),
                       ),
                       const SizedBox(width: 12),
                       Expanded(
-                        child: _buildFormField(
+                        child: buildApprovalFormField(
                           label: '수량',
-                          child: _buildTextField('2개'),
+                          child: buildApprovalTextField(quantityController, '2개'),
                         ),
                       ),
                     ],
                   ),
                   const SizedBox(height: 16),
-                  _buildFormField(
+                  buildApprovalFormField(
                     label: '내용 · 사유',
-                    child: _buildTextArea('4층 플레이스에 화이트보드 2개가 필요해요. 스터디 때 판서할 공간이 부족해요.', maxLines: 3),
+                    child: buildApprovalTextArea(
+                      reasonController,
+                      '4층 플레이스에 화이트보드 2개가 필요해요. 스터디 때 판서할 공간이 부족해요.',
+                      maxLines: 3,
+                    ),
                   ),
                   const SizedBox(height: 16),
-                  _buildFormField(
+                  buildApprovalFormField(
                     label: '첨부 (선택)',
-                    child: _buildAddFileButton(),
+                    child: buildApprovalAddFileButton(
+                      onTap: () => showApprovalToast(context, '파일 첨부는 준비 중이에요.'),
+                    ),
                   ),
                   const SizedBox(height: 16),
-                  _buildFormField(
+                  buildApprovalFormField(
                     label: '결재선',
-                    child: _buildHorizontalApprovalLine([
-                      {'name': '양지우', 'role': 'NativeOps'},
-                      {'name': '안율', 'role': 'FA'},
-                      {'name': '김민준', 'role': 'Leader'},
-                    ]),
+                    child: _linePreview(ApprovalKind.operations, amount: amountController),
                   ),
                   const SizedBox(height: 24),
                   Row(
                     children: [
                       Expanded(
-                        child: _buildActionButton(
+                        child: buildApprovalActionButton(
                           text: '임시 저장',
                           isSecondary: true,
-                          onPressed: () => Navigator.pop(context),
+                          isLoading: working == 'draft',
+                          onPressed: working != null ? null : () => submit(true),
                         ),
                       ),
                       const SizedBox(width: 12),
                       Expanded(
-                        child: _buildActionButton(
+                        child: buildApprovalActionButton(
                           text: '결재 요청 제출',
-                          onPressed: () {
-                            Navigator.pop(context);
-                            _showApprovalSuccessDialog(context, reviewerName: '양지우');
-                          },
+                          isLoading: working == 'submit',
+                          onPressed: working != null ? null : () => submit(false),
                         ),
                       ),
                     ],
@@ -1004,789 +1365,115 @@ class ApprovalTypeSelectScreen extends StatelessWidget {
           },
         );
       },
-    );
+    ).whenComplete(() => _disposeLater([amountController, quantityController, reasonController]));
   }
 
   // ===========================================================================
   // 05-11 기타 내부 문서 시트
   // ===========================================================================
-  void _showGeneralDocumentSheet(BuildContext context) {
+  void _showGeneralDocumentSheet(BuildContext context, {Approval? edit}) {
+    final titleController = TextEditingController(text: edit?.title ?? '');
+    final reasonController = TextEditingController(text: edit?.reason ?? '');
+    final files = edit?.files ?? const <ApprovalFile>[];
+    String? working;
+
+    Map<String, dynamic> body() => {
+      'kind': ApprovalKind.internal,
+      'type': '기타',
+      'title': titleController.text.trim(),
+      'reason': reasonController.text.trim(),
+    };
+
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
       builder: (context) {
-        return _BottomSheetWrapper(
-          title: '기타 내부 문서',
-          subtitle: null,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              _buildFormField(
-                label: '제목',
-                child: _buildTextField('10월 외주 회고 정리 공유 건'),
-              ),
-              const SizedBox(height: 16),
-              _buildFormField(
-                label: '본문',
-                child: _buildTextArea(
-                  '이번 달 외주 프로젝트 회고를 정리해 공유드려요. 잘한 점과 다음에 바꿀 점을 항목별로 적었고, 첨부 문서에 상세 내용이 있어요.',
-                  maxLines: 4,
-                ),
-              ),
-              const SizedBox(height: 16),
-              _buildFormField(
-                label: '첨부',
-                child: Column(
-                  children: [
-                    _buildAddFileButton(),
-                    const SizedBox(height: 8),
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                      decoration: BoxDecoration(
-                        color: const Color(0xFFF8FAFC),
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      child: Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children: const [
-                          Text(
-                            '10월_회고.docx · 82KB',
-                            style: TextStyle(
-                              fontSize: 13,
-                              color: Color(0xFF374151),
-                            ),
-                          ),
-                          Icon(Icons.close_rounded, size: 16, color: Color(0xFF9CA3AF)),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(height: 16),
-              _buildFormField(
-                label: '결재선',
-                child: Column(
-                  children: [
-                    _buildVerticalApprovalLineItem('이시우', 'Leader · iOS', '1차'),
-                    const SizedBox(height: 8),
-                    _buildVerticalApprovalLineItem('양지우', 'StudyLeader · FE', '2차'),
-                  ],
-                ),
-              ),
-              const SizedBox(height: 24),
-              Row(
+        return StatefulBuilder(
+          builder: (context, setState) {
+            Future<void> submit(bool draft) async {
+              FocusScope.of(context).unfocus();
+              if (!draft &&
+                  !(_require(context, titleController.text.trim().isNotEmpty, '제목을 적어 주세요.') &&
+                      _require(context, reasonController.text.trim().isNotEmpty, '본문을 적어 주세요.'))) {
+                return;
+              }
+              setState(() => working = draft ? 'draft' : 'submit');
+              final ok = await _save(context, body: body(), draft: draft, edit: edit);
+              if (!ok && context.mounted) setState(() => working = null);
+            }
+
+            return ApprovalSheetWrapper(
+              title: '기타 내부 문서',
+              subtitle: null,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Expanded(
-                    child: _buildActionButton(
-                      text: '임시 저장',
-                      isSecondary: true,
-                      onPressed: () => Navigator.pop(context),
+                  buildApprovalFormField(
+                    label: '제목',
+                    child: buildApprovalTextField(titleController, '10월 외주 회고 정리 공유 건', maxLength: 200),
+                  ),
+                  const SizedBox(height: 16),
+                  buildApprovalFormField(
+                    label: '본문',
+                    child: buildApprovalTextArea(
+                      reasonController,
+                      '이번 달 외주 프로젝트 회고를 정리해 공유드려요. 잘한 점과 다음에 바꿀 점을 항목별로 적었고, 첨부 문서에 상세 내용이 있어요.',
+                      maxLines: 4,
                     ),
                   ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: _buildActionButton(
-                      text: '결재 올리기',
-                      onPressed: () {
-                        Navigator.pop(context);
-                        _showApprovalSuccessDialog(context, reviewerName: '이시우');
-                      },
+                  const SizedBox(height: 16),
+                  buildApprovalFormField(
+                    label: '첨부',
+                    child: Column(
+                      children: [
+                        buildApprovalAddFileButton(
+                          onTap: () => showApprovalToast(context, '파일 첨부는 준비 중이에요.'),
+                        ),
+                        for (final f in files) ...[
+                          const SizedBox(height: 8),
+                          GestureDetector(
+                            onTap: () => showApprovalToast(context, '첨부 파일 빼기는 준비 중이에요.'),
+                            child: buildApprovalFileChip(
+                              f.sizeText.isEmpty ? f.filename : '${f.filename} · ${f.sizeText}',
+                            ),
+                          ),
+                        ],
+                      ],
                     ),
+                  ),
+                  const SizedBox(height: 16),
+                  buildApprovalFormField(
+                    label: '결재선',
+                    child: _linePreview(ApprovalKind.internal, vertical: true),
+                  ),
+                  const SizedBox(height: 24),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: buildApprovalActionButton(
+                          text: '임시 저장',
+                          isSecondary: true,
+                          isLoading: working == 'draft',
+                          onPressed: working != null ? null : () => submit(true),
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: buildApprovalActionButton(
+                          text: '결재 올리기',
+                          isLoading: working == 'submit',
+                          onPressed: working != null ? null : () => submit(false),
+                        ),
+                      ),
+                    ],
                   ),
                 ],
-              ),
-            ],
-          ),
-        );
-      },
-    );
-  }
-
-  // ===========================================================================
-  // 05-6a 비용 유형 선택 팝업
-  // ===========================================================================
-  void _showExpenseTypePicker(
-      BuildContext context,
-      String currentSelected,
-      ValueChanged<String> onSelect,
-      ) {
-    final types = [
-      '물품 구매',
-      '도구 · 구독',
-      '외부 비용',
-      '교육 · 행사',
-      '기타',
-    ];
-
-    showDialog(
-      context: context,
-      builder: (dialogContext) {
-        return Dialog(
-          backgroundColor: Colors.transparent,
-          insetPadding: const EdgeInsets.symmetric(horizontal: 24),
-          child: Container(
-            width: 320,
-            padding: const EdgeInsets.symmetric(vertical: 8),
-            decoration: BoxDecoration(
-              color: Colors.white,
-              borderRadius: BorderRadius.circular(24),
-              boxShadow: const [
-                BoxShadow(
-                  color: Color(0x1F000000),
-                  blurRadius: 20,
-                  offset: Offset(0, 8),
-                ),
-              ],
-            ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: types.map((type) {
-                final isSelected = type == currentSelected;
-                return InkWell(
-                  onTap: () {
-                    onSelect(type);
-                    Navigator.pop(dialogContext);
-                  },
-                  borderRadius: BorderRadius.circular(16),
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
-                    child: Row(
-                      children: [
-                        Container(
-                          width: 24,
-                          height: 24,
-                          decoration: BoxDecoration(
-                            color: isSelected ? const Color(0xFF2F80ED) : const Color(0xFFF1F5F9),
-                            shape: BoxShape.circle,
-                          ),
-                          child: isSelected
-                              ? const Icon(Icons.check, size: 16, color: Colors.white)
-                              : null,
-                        ),
-                        const SizedBox(width: 14),
-                        Text(
-                          type,
-                          style: TextStyle(
-                            fontSize: 14,
-                            fontWeight: isSelected ? FontWeight.bold : FontWeight.w500,
-                            color: isSelected ? const Color(0xFF2F80ED) : const Color(0xFF111827),
-                          ),
-                        ),
-                        const Spacer(),
-                        const Icon(
-                          Icons.chevron_right_rounded,
-                          color: Color(0xFF9CA3AF),
-                          size: 20,
-                        ),
-                      ],
-                    ),
-                  ),
-                );
-              }).toList(),
-            ),
-          ),
-        );
-      },
-    );
-  }
-
-  // ===========================================================================
-  // 05-6b 사용 예정일 선택 캘린더 팝업
-  // ===========================================================================
-  void _showDatePickerDialog(
-      BuildContext context,
-      DateTime initialDate,
-      ValueChanged<DateTime> onSelect,
-      ) {
-    showDialog(
-      context: context,
-      builder: (dialogContext) {
-        DateTime tempDate = initialDate;
-
-        return StatefulBuilder(
-          builder: (context, setPickerState) {
-            return Dialog(
-              backgroundColor: Colors.transparent,
-              insetPadding: const EdgeInsets.symmetric(horizontal: 24),
-              child: Container(
-                width: 320,
-                padding: const EdgeInsets.all(20),
-                decoration: BoxDecoration(
-                  color: Colors.white,
-                  borderRadius: BorderRadius.circular(24),
-                  boxShadow: const [
-                    BoxShadow(
-                      color: Color(0x1F000000),
-                      blurRadius: 20,
-                      offset: Offset(0, 8),
-                    ),
-                  ],
-                ),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        Row(
-                          children: const [
-                            Text(
-                              '2026년 10월',
-                              style: TextStyle(
-                                fontSize: 15,
-                                fontWeight: FontWeight.bold,
-                                color: Color(0xFF111827),
-                              ),
-                            ),
-                            SizedBox(width: 4),
-                            Icon(
-                              Icons.chevron_right_rounded,
-                              size: 18,
-                              color: Color(0xFF6B7280),
-                            ),
-                          ],
-                        ),
-                        Row(
-                          children: [
-                            Container(
-                              width: 32,
-                              height: 32,
-                              decoration: const BoxDecoration(
-                                color: Color(0xFFF1F5F9),
-                                shape: BoxShape.circle,
-                              ),
-                              child: const Icon(
-                                Icons.chevron_left_rounded,
-                                size: 18,
-                                color: Color(0xFF4B5563),
-                              ),
-                            ),
-                            const SizedBox(width: 8),
-                            Container(
-                              width: 32,
-                              height: 32,
-                              decoration: const BoxDecoration(
-                                color: Color(0xFFF1F5F9),
-                                shape: BoxShape.circle,
-                              ),
-                              child: const Icon(
-                                Icons.chevron_right_rounded,
-                                size: 18,
-                                color: Color(0xFF4B5563),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 16),
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceAround,
-                      children: const [
-                        Text('일', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Color(0xFFEB5757))),
-                        Text('월', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Color(0xFF6B7280))),
-                        Text('화', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Color(0xFF6B7280))),
-                        Text('수', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Color(0xFF6B7280))),
-                        Text('목', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Color(0xFF6B7280))),
-                        Text('금', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Color(0xFF6B7280))),
-                        Text('토', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Color(0xFF2F80ED))),
-                      ],
-                    ),
-                    const SizedBox(height: 12),
-                    GridView.builder(
-                      shrinkWrap: true,
-                      physics: const NeverScrollableScrollPhysics(),
-                      itemCount: 4 + 31,
-                      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                        crossAxisCount: 7,
-                        mainAxisSpacing: 8,
-                        crossAxisSpacing: 4,
-                      ),
-                      itemBuilder: (context, index) {
-                        if (index < 4) return const SizedBox.shrink();
-                        final day = index - 3;
-                        final isToday = day == 12;
-                        final isSelected = tempDate.day == day;
-                        final dayOfWeek = index % 7;
-
-                        Color textColor = const Color(0xFF111827);
-                        if (dayOfWeek == 0) textColor = const Color(0xFFEB5757);
-                        if (dayOfWeek == 6) textColor = const Color(0xFF2F80ED);
-
-                        Widget dayWidget;
-                        if (isSelected) {
-                          dayWidget = Container(
-                            decoration: const BoxDecoration(
-                              color: Color(0xFF2F80ED),
-                              shape: BoxShape.circle,
-                            ),
-                            child: Center(
-                              child: Text(
-                                '$day',
-                                style: const TextStyle(
-                                  fontSize: 13,
-                                  fontWeight: FontWeight.bold,
-                                  color: Colors.white,
-                                ),
-                              ),
-                            ),
-                          );
-                        } else if (isToday) {
-                          dayWidget = Container(
-                            decoration: BoxDecoration(
-                              shape: BoxShape.circle,
-                              border: Border.all(color: const Color(0xFF2F80ED), width: 1.5),
-                            ),
-                            child: Center(
-                              child: Text(
-                                '$day',
-                                style: TextStyle(
-                                  fontSize: 13,
-                                  fontWeight: FontWeight.bold,
-                                  color: textColor,
-                                ),
-                              ),
-                            ),
-                          );
-                        } else {
-                          dayWidget = Center(
-                            child: Text(
-                              '$day',
-                              style: TextStyle(
-                                fontSize: 13,
-                                fontWeight: FontWeight.w500,
-                                color: textColor,
-                              ),
-                            ),
-                          );
-                        }
-
-                        return GestureDetector(
-                          onTap: () {
-                            final newDate = DateTime(2026, 10, day);
-                            setPickerState(() => tempDate = newDate);
-                            onSelect(newDate);
-                            Navigator.pop(dialogContext);
-                          },
-                          child: dayWidget,
-                        );
-                      },
-                    ),
-                    const SizedBox(height: 16),
-                    const Divider(height: 1, color: Color(0xFFF3F4F6)),
-                    const SizedBox(height: 16),
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        const Text(
-                          '시간',
-                          style: TextStyle(
-                            fontSize: 13,
-                            fontWeight: FontWeight.w500,
-                            color: Color(0xFF6B7280),
-                          ),
-                        ),
-                        Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-                          decoration: BoxDecoration(
-                            color: const Color(0xFFEFF6FF),
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                          child: const Text(
-                            '오후 2:00',
-                            style: TextStyle(
-                              fontSize: 13,
-                              fontWeight: FontWeight.bold,
-                              color: Color(0xFF2F80ED),
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
               ),
             );
           },
         );
       },
-    );
-  }
-
-  // ---------------------------------------------------------------------------
-  // 공통 서브 위젯
-  // ---------------------------------------------------------------------------
-
-  Widget _buildFormField({required String label, required Widget child}) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(
-          label,
-          style: const TextStyle(
-            fontSize: 13,
-            fontWeight: FontWeight.bold,
-            color: Color(0xFF374151),
-          ),
-        ),
-        const SizedBox(height: 8),
-        child,
-      ],
-    );
-  }
-
-  Widget _buildTextField(String hintText) {
-    return Container(
-      height: 48,
-      padding: const EdgeInsets.symmetric(horizontal: 14),
-      decoration: BoxDecoration(
-        color: const Color(0xFFF8FAFC),
-        borderRadius: BorderRadius.circular(14),
-      ),
-      child: TextField(
-        controller: TextEditingController(
-          text: (hintText.startsWith('예)') ||
-              hintText.startsWith('0') ||
-              hintText.startsWith('10월') ||
-              hintText.startsWith('QA') ||
-              hintText.startsWith('2개'))
-              ? hintText
-              : null,
-        ),
-        decoration: InputDecoration(
-          hintText: (hintText.startsWith('예)') ||
-              hintText.startsWith('0') ||
-              hintText.startsWith('10월') ||
-              hintText.startsWith('QA') ||
-              hintText.startsWith('2개'))
-              ? null
-              : hintText,
-          hintStyle: const TextStyle(fontSize: 13, color: Color(0xFF9CA3AF)),
-          border: InputBorder.none,
-        ),
-        style: const TextStyle(fontSize: 14, color: Color(0xFF111827)),
-      ),
-    );
-  }
-
-  Widget _buildDropdownSelector(String value, {VoidCallback? onTap}) {
-    return GestureDetector(
-      onTap: onTap,
-      behavior: HitTestBehavior.opaque,
-      child: Container(
-        height: 48,
-        padding: const EdgeInsets.symmetric(horizontal: 14),
-        decoration: BoxDecoration(
-          color: const Color(0xFFF8FAFC),
-          borderRadius: BorderRadius.circular(14),
-        ),
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-          children: [
-            Text(
-              value,
-              style: TextStyle(
-                fontSize: 14,
-                color: value.contains('선택') ? const Color(0xFF9CA3AF) : const Color(0xFF111827),
-              ),
-            ),
-            const Icon(Icons.keyboard_arrow_down_rounded, color: Color(0xFF6B7280), size: 20),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildDatePickerField(String dateText, {VoidCallback? onTap}) {
-    return GestureDetector(
-      onTap: onTap,
-      behavior: HitTestBehavior.opaque,
-      child: Container(
-        height: 48,
-        padding: const EdgeInsets.symmetric(horizontal: 14),
-        decoration: BoxDecoration(
-          color: const Color(0xFFF8FAFC),
-          borderRadius: BorderRadius.circular(14),
-        ),
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-          children: [
-            Text(
-              dateText,
-              style: const TextStyle(fontSize: 14, color: Color(0xFF111827)),
-            ),
-            const Icon(Icons.calendar_today_outlined, color: Color(0xFF6B7280), size: 18),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildTextArea(String text, {int maxLines = 3}) {
-    return Container(
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: const Color(0xFFF8FAFC),
-        borderRadius: BorderRadius.circular(14),
-      ),
-      child: TextField(
-        controller: TextEditingController(
-          text: (text.contains('필요해요') || text.contains('회고')) ? text : null,
-        ),
-        maxLines: maxLines,
-        decoration: InputDecoration(
-          hintText: (text.contains('필요해요') || text.contains('회고')) ? null : text,
-          hintStyle: const TextStyle(fontSize: 13, color: Color(0xFF9CA3AF)),
-          border: InputBorder.none,
-          isDense: true,
-          contentPadding: EdgeInsets.zero,
-        ),
-        style: const TextStyle(fontSize: 13, color: Color(0xFF111827), height: 1.4),
-      ),
-    );
-  }
-
-  Widget _buildAddFileButton() {
-    return Container(
-      width: double.infinity,
-      height: 48,
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(
-          color: const Color(0xFFE5E7EB),
-          style: BorderStyle.solid,
-        ),
-      ),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: const [
-          Icon(Icons.add, color: Color(0xFF2F80ED), size: 18),
-          SizedBox(width: 4),
-          Text(
-            '파일 추가',
-            style: TextStyle(
-              fontSize: 13,
-              fontWeight: FontWeight.bold,
-              color: Color(0xFF2F80ED),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildHorizontalApprovalLine(List<Map<String, String>> members) {
-  return Container(
-  width: double.infinity,
-  padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 12),
-  decoration: BoxDecoration(
-  color: const Color(0xFFF8FAFC),
-  borderRadius: BorderRadius.circular(16),
-  ),
-  child: Row(
-  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-  children: List.generate(members.length * 2 - 1, (index) {
-  if (index.isOdd) {
-  return const Icon(Icons.chevron_right_rounded, color: Color(0xFF9CA3AF), size: 18);
-  }
-  final member = members[index ~/ 2];
-  return Column(
-  children: [
-  const CircleAvatar(
-  radius: 14,
-  backgroundColor: Color(0xFFE2E8F0),
-  ),
-  const SizedBox(height: 6),
-  Text(
-  member['name']!,
-  style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Color(0xFF111827)),
-  ),
-  Text(
-  member['role']!,
-  style: const TextStyle(fontSize: 10, color: Color(0xFF9CA3AF)),
-  ),
-  ],
-  );
-  }),
-  ),
-  );
-  }
-
-  Widget _buildVerticalApprovalLineItem(String name, String subtitle, String stepBadge) {
-  return Container(
-  padding: const EdgeInsets.all(12),
-  decoration: BoxDecoration(
-  color: const Color(0xFFF8FAFC),
-  borderRadius: BorderRadius.circular(14),
-  ),
-  child: Row(
-  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-  children: [
-  Row(
-  children: [
-  const CircleAvatar(
-  radius: 14,
-  backgroundColor: Color(0xFFE2E8F0),
-  ),
-  const SizedBox(width: 10),
-  Column(
-  crossAxisAlignment: CrossAxisAlignment.start,
-  children: [
-  Text(
-  name,
-  style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: Color(0xFF111827)),
-  ),
-  Text(
-  subtitle,
-  style: const TextStyle(fontSize: 11, color: Color(0xFF9CA3AF)),
-  ),
-  ],
-  ),
-  ],
-  ),
-  Container(
-  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-  decoration: BoxDecoration(
-  color: const Color(0xFFEFF6FF),
-  borderRadius: BorderRadius.circular(6),
-  ),
-  child: Text(
-  stepBadge,
-  style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Color(0xFF2F80ED)),
-  ),
-  ),
-  ],
-  ),
-  );
-  }
-
-  Widget _buildActionButton({
-  required String text,
-  required VoidCallback onPressed,
-  bool isSecondary = false,
-  }) {
-  return SizedBox(
-  height: 52,
-  child: ElevatedButton(
-  onPressed: onPressed,
-  style: ElevatedButton.styleFrom(
-  backgroundColor: isSecondary ? const Color(0xFFF1F5F9) : const Color(0xFF2F80ED),
-  elevation: 0,
-  shape: RoundedRectangleBorder(
-  borderRadius: BorderRadius.circular(16),
-  ),
-  ),
-  child: Text(
-  text,
-  style: TextStyle(
-  fontSize: 15,
-  fontWeight: FontWeight.bold,
-  color: isSecondary ? const Color(0xFF4B5563) : Colors.white,
-  ),
-  ),
-  ),
-  );
-  }
-}
-
-// -----------------------------------------------------------------------------
-// 공통 바텀시트 컨테이너 래퍼
-// -----------------------------------------------------------------------------
-class _BottomSheetWrapper extends StatelessWidget {
-  final String title;
-  final String? subtitle;
-  final Widget child;
-
-  const _BottomSheetWrapper({
-    required this.title,
-    this.subtitle,
-    required this.child,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      constraints: BoxConstraints(
-        maxHeight: MediaQuery.of(context).size.height * 0.9,
-      ),
-      decoration: const BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
-      ),
-      child: SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Container(
-              width: 36,
-              height: 4,
-              margin: const EdgeInsets.only(top: 12, bottom: 12),
-              decoration: BoxDecoration(
-                color: const Color(0xFFE5E7EB),
-                borderRadius: BorderRadius.circular(2),
-              ),
-            ),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 20),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        title,
-                        style: const TextStyle(
-                          fontSize: 18,
-                          fontWeight: FontWeight.bold,
-                          color: Color(0xFF111827),
-                        ),
-                      ),
-                      if (subtitle != null) ...[
-                        const SizedBox(height: 2),
-                        Text(
-                          subtitle!,
-                          style: const TextStyle(
-                            fontSize: 12,
-                            color: Color(0xFF6B7280),
-                          ),
-                        ),
-                      ],
-                    ],
-                  ),
-                  GestureDetector(
-                    onTap: () => Navigator.pop(context),
-                    child: Container(
-                      width: 32,
-                      height: 32,
-                      decoration: const BoxDecoration(
-                        color: Color(0xFFF3F4F6),
-                        shape: BoxShape.circle,
-                      ),
-                      child: const Icon(
-                        Icons.close_rounded,
-                        color: Color(0xFF4B5563),
-                        size: 18,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(height: 16),
-            const Divider(height: 1, color: Color(0xFFF3F4F6)),
-            Flexible(
-              child: SingleChildScrollView(
-                padding: const EdgeInsets.all(20),
-                child: child,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
+    ).whenComplete(() => _disposeLater([titleController, reasonController]));
   }
 }

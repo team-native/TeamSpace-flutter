@@ -1,7 +1,65 @@
 import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
+import '../app/router.dart';
+import 'package:teamspace/core/network/api_exception.dart';
+import 'package:teamspace/data/models/document_models.dart';
+import 'package:teamspace/data/repositories/document_repository.dart';
+import 'package:teamspace/shared/widgets/state_views.dart';
 
-class TemplateDetailScreen extends StatelessWidget {
+class TemplateDetailScreen extends StatefulWidget {
   const TemplateDetailScreen({super.key});
+
+  @override
+  State<TemplateDetailScreen> createState() => _TemplateDetailScreenState();
+}
+
+class _TemplateDetailScreenState extends State<TemplateDetailScreen> {
+  String? _slug;
+  bool _started = false;
+
+  DocumentDetail? _detail;
+  bool _isLoading = true;
+  String? _errorMessage;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (!_started) {
+      _started = true;
+      _slug = GoRouterState.of(context).uri.queryParameters['slug'];
+      _load();
+    }
+  }
+
+  Future<void> _load() async {
+    final slug = _slug;
+    if (slug == null || slug.isEmpty) {
+      setState(() {
+        _errorMessage = '템플릿 정보를 찾을 수 없어요.';
+        _isLoading = false;
+      });
+      return;
+    }
+    setState(() {
+      _isLoading = true;
+      _errorMessage = null;
+    });
+    try {
+      final detail = await DocumentRepository.instance.getDoc(slug);
+      if (!mounted) return;
+      setState(() {
+        _detail = detail;
+        _isLoading = false;
+      });
+      DocumentRepository.instance.markRead(slug).catchError((_) {});
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _errorMessage = e.message;
+        _isLoading = false;
+      });
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -9,6 +67,8 @@ class TemplateDetailScreen extends StatelessWidget {
     const primaryBlue = Color(0xFF2F80ED);
     const textDark = Color(0xFF111827);
     const textGrey = Color(0xFF6B7280);
+
+    final detail = _detail;
 
     return Scaffold(
       backgroundColor: bgColor,
@@ -48,7 +108,18 @@ class TemplateDetailScreen extends StatelessWidget {
         child: Column(
           children: [
             Expanded(
-              child: SingleChildScrollView(
+              child: _isLoading
+                  ? const Padding(
+                padding: EdgeInsets.all(20),
+                child: SkeletonList(count: 3),
+              )
+                  : _errorMessage != null
+                  ? ErrorStateView(
+                title: '템플릿을 불러오지 못했어요',
+                message: _errorMessage,
+                onRetry: _load,
+              )
+                  : SingleChildScrollView(
                 padding: const EdgeInsets.all(20),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -64,9 +135,9 @@ class TemplateDetailScreen extends StatelessWidget {
                       ),
                     ),
                     const SizedBox(height: 6),
-                    const Text(
-                      '예산 품의서',
-                      style: TextStyle(
+                    Text(
+                      detail!.doc.title.isEmpty ? '제목 없음' : detail.doc.title,
+                      style: const TextStyle(
                         fontSize: 22,
                         fontWeight: FontWeight.w800,
                         color: textDark,
@@ -74,9 +145,9 @@ class TemplateDetailScreen extends StatelessWidget {
                       ),
                     ),
                     const SizedBox(height: 6),
-                    const Text(
-                      '비용 승인 요청 전에 쓰는 기본 서식이에요.\n작성하면 바로 결재로 이어져요.',
-                      style: TextStyle(
+                    Text(
+                      detail.doc.copy,
+                      style: const TextStyle(
                         fontSize: 13,
                         color: textGrey,
                         height: 1.4,
@@ -94,90 +165,94 @@ class TemplateDetailScreen extends StatelessWidget {
                       ),
                     ),
                     const SizedBox(height: 12),
-                    Container(
-                      width: double.infinity,
-                      decoration: BoxDecoration(
-                        color: Colors.white,
-                        borderRadius: BorderRadius.circular(20),
+                    if (detail.fields.isEmpty)
+                      Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.all(16),
+                        decoration: BoxDecoration(
+                          color: Colors.white,
+                          borderRadius: BorderRadius.circular(20),
+                        ),
+                        child: const Text(
+                          '이 템플릿에 등록된 세부 항목 정보가 아직 없어요.',
+                          style: TextStyle(fontSize: 13, color: textGrey),
+                        ),
+                      )
+                    else
+                      Container(
+                        width: double.infinity,
+                        decoration: BoxDecoration(
+                          color: Colors.white,
+                          borderRadius: BorderRadius.circular(20),
+                        ),
+                        child: Column(
+                          children: [
+                            for (var i = 0; i < detail.fields.length; i++) ...[
+                              if (i > 0) const Divider(height: 1, color: Color(0xFFF1F5F9)),
+                              _buildIncludedItem(
+                                title: detail.fields[i].title,
+                                subtitle: detail.fields[i].subtitle,
+                              ),
+                            ],
+                          ],
+                        ),
                       ),
-                      child: Column(
-                        children: [
-                          _buildIncludedItem(
-                            title: '비용 유형',
-                            subtitle: '물품 · 구독 · 외부 비용',
-                          ),
-                          const Divider(height: 1, color: Color(0xFFF1F5F9)),
-                          _buildIncludedItem(
-                            title: '요청 금액과 사용일',
-                            subtitle: '부가가치세 포함 금액',
-                          ),
-                          const Divider(height: 1, color: Color(0xFFF1F5F9)),
-                          _buildIncludedItem(
-                            title: '요청 사유',
-                            subtitle: '목적과 기대 효과',
-                          ),
-                          const Divider(height: 1, color: Color(0xFFF1F5F9)),
-                          _buildIncludedItem(
-                            title: '첨부',
-                            subtitle: '견적서 · 영수증',
-                          ),
-                        ],
-                      ),
-                    ),
                     const SizedBox(height: 20),
 
                     // 3. 하단 알림 안내 박스
-                    Container(
-                      width: double.infinity,
-                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-                      decoration: BoxDecoration(
-                        color: const Color(0xFFEFF6FF),
-                        borderRadius: BorderRadius.circular(16),
-                      ),
-                      child: const Text(
-                        '첫 이번 달 12명이 이 템플릿을 사용했어요',
-                        style: TextStyle(
-                          fontSize: 13,
-                          fontWeight: FontWeight.bold,
-                          color: primaryBlue,
+                    if (detail.doc.usageThisMonth != null)
+                      Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFEFF6FF),
+                          borderRadius: BorderRadius.circular(16),
+                        ),
+                        child: Text(
+                          '이번 달 ${detail.doc.usageThisMonth}명이 이 템플릿을 사용했어요',
+                          style: const TextStyle(
+                            fontSize: 13,
+                            fontWeight: FontWeight.bold,
+                            color: primaryBlue,
+                          ),
                         ),
                       ),
-                    ),
                   ],
                 ),
               ),
             ),
 
             // 4. 하단 버튼
-            Container(
-              padding: const EdgeInsets.all(20),
-              color: bgColor,
-              child: SizedBox(
-                width: double.infinity,
-                height: 52,
-                child: ElevatedButton.icon(
-                  onPressed: () {
-                    Navigator.pop(context);
-                  },
-                  icon: const Icon(Icons.edit_outlined, size: 18, color: Colors.white),
-                  label: const Text(
-                    '이 템플릿으로 작성하기',
-                    style: TextStyle(
-                      fontSize: 15,
-                      fontWeight: FontWeight.bold,
-                      color: Colors.white,
+            if (!_isLoading && _errorMessage == null && detail != null)
+              Container(
+                padding: const EdgeInsets.all(20),
+                color: bgColor,
+                child: SizedBox(
+                  width: double.infinity,
+                  height: 52,
+                  child: ElevatedButton.icon(
+                    onPressed: () => context.push(
+                      '${AppRoutes.approvalTypeSelect}?templateSlug=${detail.doc.slug}',
                     ),
-                  ),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: primaryBlue,
-                    elevation: 0,
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(16),
+                    icon: const Icon(Icons.edit_outlined, size: 18, color: Colors.white),
+                    label: const Text(
+                      '이 템플릿으로 작성하기',
+                      style: TextStyle(
+                        fontSize: 15,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.white,
+                      ),
+                    ),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: primaryBlue,
+                      elevation: 0,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(16),
+                      ),
                     ),
                   ),
                 ),
               ),
-            ),
           ],
         ),
       ),
@@ -203,26 +278,30 @@ class TemplateDetailScreen extends StatelessWidget {
             ),
           ),
           const SizedBox(width: 14),
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                title,
-                style: const TextStyle(
-                  fontSize: 14,
-                  fontWeight: FontWeight.bold,
-                  color: Color(0xFF111827),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  title.isEmpty ? '항목' : title,
+                  style: const TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.bold,
+                    color: Color(0xFF111827),
+                  ),
                 ),
-              ),
-              const SizedBox(height: 2),
-              Text(
-                subtitle,
-                style: const TextStyle(
-                  fontSize: 12,
-                  color: Color(0xFF6B7280),
-                ),
-              ),
-            ],
+                if (subtitle.isNotEmpty) ...[
+                  const SizedBox(height: 2),
+                  Text(
+                    subtitle,
+                    style: const TextStyle(
+                      fontSize: 12,
+                      color: Color(0xFF6B7280),
+                    ),
+                  ),
+                ],
+              ],
+            ),
           ),
         ],
       ),

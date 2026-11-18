@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
+import 'package:teamspace/core/network/api_exception.dart';
+import 'package:teamspace/data/repositories/my_space_repository.dart';
 
 class ChangePasswordScreen extends StatefulWidget {
   const ChangePasswordScreen({super.key});
@@ -13,9 +15,28 @@ class _ChangePasswordScreenState extends State<ChangePasswordScreen> {
   final _newPasswordController = TextEditingController();
   final _confirmPasswordController = TextEditingController();
 
-  // 피그마 상태 예시용 에러 상태 플래그
-  final bool _hasCurrentPasswordError = false;
-  final bool _hasConfirmMismatchError = false;
+  // 입력 아래 / 화면 아래에 보여줄 오류
+  String? _newPasswordError; // 새 비밀번호 칸 아래
+  bool _hasConfirmMismatchError = false; // 확인 칸 아래
+  String? _bannerError; // 아래 빨간 배너 (현재 비밀번호 불일치 등)
+  bool _isSubmitting = false;
+
+  @override
+  void initState() {
+    super.initState();
+    for (final c in [_currentPasswordController, _newPasswordController, _confirmPasswordController]) {
+      c.addListener(_clearErrors);
+    }
+  }
+
+  void _clearErrors() {
+    if (_newPasswordError == null && !_hasConfirmMismatchError && _bannerError == null) return;
+    setState(() {
+      _newPasswordError = null;
+      _hasConfirmMismatchError = false;
+      _bannerError = null;
+    });
+  }
 
   @override
   void dispose() {
@@ -25,15 +46,62 @@ class _ChangePasswordScreenState extends State<ChangePasswordScreen> {
     super.dispose();
   }
 
-  void _handleChangePassword() {
-    // 비밀번호 변경 처리 로직
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('비밀번호가 변경되었습니다.'),
-        behavior: SnackBarBehavior.floating,
-      ),
-    );
-    context.pop();
+  /// PATCH /me/settings { currentPassword, newPassword }
+  Future<void> _handleChangePassword() async {
+    if (_isSubmitting) return;
+    FocusScope.of(context).unfocus();
+
+    final current = _currentPasswordController.text;
+    final next = _newPasswordController.text;
+    final confirm = _confirmPasswordController.text;
+
+    // 1) 앱에서 먼저 확인
+    if (current.isEmpty) {
+      setState(() => _bannerError = '현재 비밀번호를 입력해 주세요.');
+      return;
+    }
+    if (next.length < 8) {
+      setState(() => _newPasswordError = '8자 이상으로 정해 주세요.');
+      return;
+    }
+    if (next == current) {
+      setState(() => _newPasswordError = '지금 비밀번호와 다르게 정해 주세요.');
+      return;
+    }
+    if (next != confirm) {
+      setState(() => _hasConfirmMismatchError = true);
+      return;
+    }
+
+    // 2) 서버에 저장
+    setState(() => _isSubmitting = true);
+    try {
+      await MySpaceRepository.instance.changePassword(
+        currentPassword: current,
+        newPassword: next,
+      );
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('비밀번호를 바꿨어요.'),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+      context.pop();
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _isSubmitting = false;
+        // 400: 현재 비밀번호 불일치 / 422: 새 비밀번호 규칙 위반
+        if (e.statusCode == 400) {
+          _bannerError = '현재 비밀번호가 맞지 않아요.';
+        } else if (e.statusCode == 422) {
+          _newPasswordError = e.message;
+        } else {
+          _bannerError = e.message;
+        }
+      });
+    }
   }
 
   @override
@@ -158,13 +226,14 @@ class _ChangePasswordScreenState extends State<ChangePasswordScreen> {
                             hintText: '새 비밀번호',
                           ),
                           const SizedBox(height: 6),
-                          const Padding(
-                            padding: EdgeInsets.only(left: 4),
+                          Padding(
+                            padding: const EdgeInsets.only(left: 4),
                             child: Text(
-                              '8자 이상',
+                              _newPasswordError ?? '8자 이상',
                               style: TextStyle(
                                 fontSize: 12,
-                                color: textLightGrey,
+                                fontWeight: _newPasswordError != null ? FontWeight.w500 : FontWeight.normal,
+                                color: _newPasswordError != null ? errorRed : textLightGrey,
                               ),
                             ),
                           ),
@@ -195,7 +264,7 @@ class _ChangePasswordScreenState extends State<ChangePasswordScreen> {
                     ),
 
                     // 피그마 전체 오류 메시지 배너
-                    if (_hasCurrentPasswordError) ...[
+                    if (_bannerError != null) ...[
                       const SizedBox(height: 16),
                       Container(
                         width: double.infinity,
@@ -205,9 +274,9 @@ class _ChangePasswordScreenState extends State<ChangePasswordScreen> {
                           color: const Color(0xFFFFF1F2),
                           borderRadius: BorderRadius.circular(16),
                         ),
-                        child: const Text(
-                          '현재 비밀번호가 맞지 않아요.',
-                          style: TextStyle(
+                        child: Text(
+                          _bannerError!,
+                          style: const TextStyle(
                             fontSize: 13,
                             fontWeight: FontWeight.bold,
                             color: errorRed,
@@ -223,15 +292,25 @@ class _ChangePasswordScreenState extends State<ChangePasswordScreen> {
                       width: double.infinity,
                       height: 52,
                       child: ElevatedButton(
-                        onPressed: _handleChangePassword,
+                        onPressed: _isSubmitting ? null : _handleChangePassword,
                         style: ElevatedButton.styleFrom(
                           backgroundColor: primaryBlue,
+                          disabledBackgroundColor: const Color(0xFF93C5FD),
                           elevation: 0,
                           shape: RoundedRectangleBorder(
                             borderRadius: BorderRadius.circular(16),
                           ),
                         ),
-                        child: const Text(
+                        child: _isSubmitting
+                            ? const SizedBox(
+                          width: 22,
+                          height: 22,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2.4,
+                            color: Colors.white,
+                          ),
+                        )
+                            : const Text(
                           '비밀번호 바꾸기',
                           style: TextStyle(
                             fontSize: 16,

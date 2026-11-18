@@ -1,5 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
+import 'package:teamspace/core/network/api_exception.dart';
+import 'package:teamspace/data/repositories/auth_repository.dart';
+import 'package:teamspace/data/repositories/home_repository.dart';
+import 'package:teamspace/data/repositories/my_space_repository.dart';
 import '../app/router.dart';
 
 class SettingsScreen extends StatefulWidget {
@@ -11,12 +15,85 @@ class SettingsScreen extends StatefulWidget {
 
 class _SettingsScreenState extends State<SettingsScreen> {
   bool _isDarkMode = false;
+  bool _isSavingTheme = false;
+  String? _roleLabel; // 재정 정보 권한 배지 (관리자 / 재정 담당 / 리더 / 구성원)
+
+  @override
+  void initState() {
+    super.initState();
+    _loadSettings();
+    _loadRole();
+  }
+
+  /// GET /me/settings
+  Future<void> _loadSettings() async {
+    try {
+      final settings = await MySpaceRepository.instance.getSettings();
+      if (!mounted) return;
+      setState(() => _isDarkMode = settings.isDark);
+    } on ApiException {
+      // 못 불러오면 기본값(시스템)으로 둬요
+    }
+  }
+
+  /// GET /me 의 roles → 재정 정보 권한 배지
+  Future<void> _loadRole() async {
+    try {
+      final me = await HomeRepository.instance.getMe();
+      if (!mounted) return;
+      final roles = me.roles.map((r) => r.trim().toLowerCase()).toSet();
+      setState(() {
+        if (roles.contains('admin')) {
+          _roleLabel = '관리자';
+        } else if (roles.contains('fa')) {
+          _roleLabel = '재정 담당';
+        } else if (roles.contains('leader')) {
+          _roleLabel = '리더';
+        } else {
+          _roleLabel = '구성원';
+        }
+      });
+    } on ApiException {
+      // 못 불러오면 배지를 숨겨요
+    }
+  }
+
+  /// PATCH /me/settings { theme: 다크 | 시스템 }
+  Future<void> _toggleDarkMode(bool value) async {
+    if (_isSavingTheme) return;
+    final before = _isDarkMode;
+    setState(() {
+      _isDarkMode = value;
+      _isSavingTheme = true;
+    });
+    try {
+      final saved = await MySpaceRepository.instance.updateTheme(value ? '다크' : '시스템');
+      if (!mounted) return;
+      setState(() => _isDarkMode = saved.isDark);
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      setState(() => _isDarkMode = before);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(e.message), duration: const Duration(seconds: 2)),
+      );
+    } finally {
+      if (mounted) setState(() => _isSavingTheme = false);
+    }
+  }
+
+  /// 저장된 토큰을 지우고 로그인 화면으로 가요
+  /// (서버에는 로그아웃 API가 없어서 기기에서만 지워요)
+  Future<void> _logout() async {
+    await AuthRepository.instance.logout();
+    if (!mounted) return;
+    context.go(AppRoutes.login);
+  }
 
   // 💡 07-17 로그아웃 확인 모달 다이얼로그
   void _showLogoutDialog(BuildContext context) {
     showDialog(
       context: context,
-      builder: (context) {
+      builder: (dialogContext) {
         return Dialog(
           backgroundColor: Colors.white,
           elevation: 0,
@@ -72,8 +149,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   height: 48,
                   child: ElevatedButton(
                     onPressed: () {
-                      Navigator.pop(context);
-                      context.go(AppRoutes.login);
+                      Navigator.pop(dialogContext);
+                      _logout();
                     },
                     style: ElevatedButton.styleFrom(
                       backgroundColor: const Color(0xFF3182F6),
@@ -99,7 +176,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   width: double.infinity,
                   height: 48,
                   child: ElevatedButton(
-                    onPressed: () => Navigator.pop(context),
+                    onPressed: () => Navigator.pop(dialogContext),
                     style: ElevatedButton.styleFrom(
                       backgroundColor: const Color(0xFFF1F5F9),
                       elevation: 0,
@@ -200,11 +277,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
                             color: const Color(0xFF6366F1),
                           ),
                           const SizedBox(width: 14),
-                          const Expanded(
+                          Expanded(
                             child: Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
-                                Text(
+                                const Text(
                                   '다크 모드',
                                   style: TextStyle(
                                     fontSize: 15,
@@ -212,10 +289,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
                                     color: textDark,
                                   ),
                                 ),
-                                SizedBox(height: 2),
+                                const SizedBox(height: 2),
                                 Text(
-                                  '시스템 설정을 따라가요',
-                                  style: TextStyle(
+                                  _isDarkMode ? '어두운 화면으로 저장했어요' : '시스템 설정을 따라가요',
+                                  style: const TextStyle(
                                     fontSize: 12,
                                     color: textGrey,
                                   ),
@@ -225,7 +302,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           ),
                           Switch(
                             value: _isDarkMode,
-                            onChanged: (val) => setState(() => _isDarkMode = val),
+                            onChanged: _isSavingTheme ? null : _toggleDarkMode,
                             activeThumbColor: const Color(0xFF3182F6),
                           ),
                         ],
@@ -339,22 +416,23 @@ class _SettingsScreenState extends State<SettingsScreen> {
                                     ),
                                   ),
                                 ),
-                                Container(
-                                  padding: const EdgeInsets.symmetric(
-                                      horizontal: 10, vertical: 4),
-                                  decoration: BoxDecoration(
-                                    color: const Color(0xFFEFF6FF),
-                                    borderRadius: BorderRadius.circular(12),
-                                  ),
-                                  child: const Text(
-                                    '구성원',
-                                    style: TextStyle(
-                                      fontSize: 12,
-                                      fontWeight: FontWeight.bold,
-                                      color: Color(0xFF3182F6),
+                                if (_roleLabel != null)
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(
+                                        horizontal: 10, vertical: 4),
+                                    decoration: BoxDecoration(
+                                      color: const Color(0xFFEFF6FF),
+                                      borderRadius: BorderRadius.circular(12),
+                                    ),
+                                    child: Text(
+                                      _roleLabel!,
+                                      style: const TextStyle(
+                                        fontSize: 12,
+                                        fontWeight: FontWeight.bold,
+                                        color: Color(0xFF3182F6),
+                                      ),
                                     ),
                                   ),
-                                ),
                               ],
                             ),
                           ),
@@ -370,7 +448,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       child: Column(
                         children: [
                           InkWell(
-                            onTap: () {},
+                            onTap: () => context.push(AppRoutes.noticeList),
                             borderRadius: BorderRadius.circular(12),
                             child: const Row(
                               children: [

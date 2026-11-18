@@ -1,8 +1,70 @@
 import 'dart:math';
 import 'package:flutter/material.dart';
+import 'package:teamspace/core/network/api_exception.dart';
+import 'package:teamspace/data/models/finance_models.dart';
+import 'package:teamspace/data/repositories/finance_repository.dart';
+import 'package:teamspace/shared/widgets/state_views.dart';
 
-class FinanceCompositionScreen extends StatelessWidget {
+Color _parseHex(String hex, Color fallback) {
+  var value = hex.trim();
+  if (value.isEmpty) return fallback;
+  value = value.replaceFirst('#', '');
+  if (value.length == 6) value = 'FF$value';
+  final parsed = int.tryParse(value, radix: 16);
+  return parsed == null ? fallback : Color(parsed);
+}
+
+String _defaultDesc(String poolId) {
+  switch (poolId) {
+    case 'operation':
+      return '지금 사용할 수 있는 운영 자금';
+    case 'reserve':
+      return '다음 프로젝트를 위해 모아두는 자금';
+    case 'dividend':
+      return '기여도에 따라 배분되는 비율';
+    default:
+      return '자동으로 배분되는 자금';
+  }
+}
+
+class FinanceCompositionScreen extends StatefulWidget {
   const FinanceCompositionScreen({super.key});
+
+  @override
+  State<FinanceCompositionScreen> createState() => _FinanceCompositionScreenState();
+}
+
+class _FinanceCompositionScreenState extends State<FinanceCompositionScreen> {
+  FinanceSummary? _summary;
+  bool _isLoading = true;
+  String? _errorMessage;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    setState(() {
+      _isLoading = true;
+      _errorMessage = null;
+    });
+    try {
+      final summary = await FinanceRepository.instance.getSummary();
+      if (!mounted) return;
+      setState(() {
+        _summary = summary;
+        _isLoading = false;
+      });
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _errorMessage = e.message;
+        _isLoading = false;
+      });
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -10,6 +72,9 @@ class FinanceCompositionScreen extends StatelessWidget {
     const textDark = Color(0xFF111827);
     const textGrey = Color(0xFF8E8E93);
     const cardBorderColor = Color(0x1A000000);
+
+    final pools = _summary?.pools ?? const <FinanceSummaryPool>[];
+    final totalRatio = pools.fold<num>(0, (sum, p) => sum + p.ratio);
 
     return Scaffold(
       backgroundColor: bgColor,
@@ -45,119 +110,133 @@ class FinanceCompositionScreen extends StatelessWidget {
           ),
         ),
       ),
-      body: SingleChildScrollView(
-        padding: const EdgeInsets.all(20),
-        child: Column(
-          children: [
-            Container(
-              padding: const EdgeInsets.all(24),
-              decoration: BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.circular(24),
-                border: Border.all(color: cardBorderColor, width: 1),
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text(
-                    '몫 배분',
-                    style: TextStyle(
-                      fontSize: 13,
-                      fontWeight: FontWeight.w500,
-                      color: textGrey,
-                    ),
-                  ),
-                  const SizedBox(height: 6),
-                  const Text(
-                    '들어온 돈은\n이렇게 나누고 있어요',
-                    style: TextStyle(
-                      fontSize: 20,
-                      fontWeight: FontWeight.bold,
-                      color: textDark,
-                      height: 1.3,
-                      letterSpacing: -0.4,
-                    ),
-                  ),
-                  const SizedBox(height: 32),
-
-                  // 도넛 차트
-                  Center(
-                    child: SizedBox(
-                      width: 175,
-                      height: 175,
-                      child: Stack(
-                        children: [
-                          CustomPaint(
-                            size: const Size(175, 175),
-                            painter: DonutChartPainter(),
-                          ),
-                          Center(
-                            child: Column(
-                              mainAxisAlignment: MainAxisAlignment.center,
-                              children: const [
-                                Text(
-                                  '100%',
-                                  style: TextStyle(
-                                    fontSize: 24,
-                                    fontWeight: FontWeight.w800,
-                                    color: textDark,
-                                    letterSpacing: -0.5,
-                                  ),
-                                ),
-                                SizedBox(height: 2),
-                                Text(
-                                  '자동 배분',
-                                  style: TextStyle(
-                                    fontSize: 13,
-                                    color: Color(0xFF9CA3AF),
-                                    fontWeight: FontWeight.w500,
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ],
+      body: _isLoading
+          ? const Padding(
+        padding: EdgeInsets.all(20),
+        child: SkeletonList(count: 3),
+      )
+          : _errorMessage != null
+          ? ErrorStateView(
+        title: '구성 정보를 불러오지 못했어요',
+        message: _errorMessage,
+        onRetry: _load,
+      )
+          : RefreshIndicator(
+        onRefresh: _load,
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            children: [
+              Container(
+                padding: const EdgeInsets.all(24),
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(24),
+                  border: Border.all(color: cardBorderColor, width: 1),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      '몫 배분',
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w500,
+                        color: textGrey,
                       ),
                     ),
-                  ),
+                    const SizedBox(height: 6),
+                    const Text(
+                      '들어온 돈은\n이렇게 나누고 있어요',
+                      style: TextStyle(
+                        fontSize: 20,
+                        fontWeight: FontWeight.bold,
+                        color: textDark,
+                        height: 1.3,
+                        letterSpacing: -0.4,
+                      ),
+                    ),
+                    const SizedBox(height: 32),
 
-                  const SizedBox(height: 36),
-
-                  // image_5aad27.png 시안 1:1 맞춤 몫 배분 리스트
-                  _buildLegendRow(
-                    containerBg: const Color(0xFFEFF6FF),
-                    accentColor: const Color(0xFF3B82F6),
-                    title: '운영풀',
-                    desc: '지금 사용할 수 있는 운영 자금',
-                    percentage: '40%',
-                  ),
-                  const Divider(height: 28, color: Color(0xFFF3F4F6)),
-                  _buildLegendRow(
-                    containerBg: const Color(0xFFF5F3FF),
-                    accentColor: const Color(0xFF8B5CF6),
-                    title: '적립풀',
-                    desc: '다음 프로젝트를 위해 모아두는 자금',
-                    percentage: '30%',
-                  ),
-                  const Divider(height: 28, color: Color(0xFFF3F4F6)),
-                  _buildLegendRow(
-                    containerBg: const Color(0xFFFFF7ED),
-                    accentColor: const Color(0xFFE09F71),
-                    title: '배당풀',
-                    desc: '기여도에 따라 배분되는 비율',
-                    percentage: '30%',
-                  ),
-                ],
+                    // 도넛 차트
+                    if (pools.isEmpty)
+                      const Padding(
+                        padding: EdgeInsets.symmetric(vertical: 24),
+                        child: EmptyStateView(
+                          icon: Icons.pie_chart_outline_rounded,
+                          title: '설정된 풀 배분 정보가 없어요',
+                        ),
+                      )
+                    else ...[
+                      Center(
+                        child: SizedBox(
+                          width: 175,
+                          height: 175,
+                          child: Stack(
+                            children: [
+                              CustomPaint(
+                                size: const Size(175, 175),
+                                painter: DonutChartPainter(
+                                  segments: [
+                                    for (final pool in pools)
+                                      _Segment(
+                                        ratio: totalRatio <= 0 ? 0 : pool.ratio / totalRatio,
+                                        color: _parseHex(pool.colorHex, const Color(0xFF2F80ED)),
+                                      ),
+                                  ],
+                                ),
+                              ),
+                              Center(
+                                child: Column(
+                                  mainAxisAlignment: MainAxisAlignment.center,
+                                  children: [
+                                    Text(
+                                      '${totalRatio.round()}%',
+                                      style: const TextStyle(
+                                        fontSize: 24,
+                                        fontWeight: FontWeight.w800,
+                                        color: textDark,
+                                        letterSpacing: -0.5,
+                                      ),
+                                    ),
+                                    const SizedBox(height: 2),
+                                    const Text(
+                                      '자동 배분',
+                                      style: TextStyle(
+                                        fontSize: 13,
+                                        color: Color(0xFF9CA3AF),
+                                        fontWeight: FontWeight.w500,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 36),
+                      for (var i = 0; i < pools.length; i++) ...[
+                        if (i > 0) const Divider(height: 28, color: Color(0xFFF3F4F6)),
+                        _buildLegendRow(
+                          accentColor: _parseHex(pools[i].colorHex, const Color(0xFF2F80ED)),
+                          title: pools[i].label,
+                          desc: pools[i].note.isNotEmpty ? pools[i].note : _defaultDesc(pools[i].id),
+                          percentage: '${pools[i].ratio}%',
+                        ),
+                      ],
+                    ],
+                  ],
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );
   }
 
   Widget _buildLegendRow({
-    required Color containerBg,
     required Color accentColor,
     required String title,
     required String desc,
@@ -169,7 +248,7 @@ class FinanceCompositionScreen extends StatelessWidget {
           width: 44,
           height: 44,
           decoration: BoxDecoration(
-            color: containerBg,
+            color: accentColor.withValues(alpha: 0.12),
             borderRadius: BorderRadius.circular(12),
           ),
           child: Center(
@@ -221,6 +300,10 @@ class FinanceCompositionScreen extends StatelessWidget {
 }
 
 class DonutChartPainter extends CustomPainter {
+  final List<_Segment> segments;
+
+  DonutChartPainter({required this.segments});
+
   @override
   void paint(Canvas canvas, Size size) {
     final center = Offset(size.width / 2, size.height / 2);
@@ -234,23 +317,17 @@ class DonutChartPainter extends CustomPainter {
 
     const gap = 0.06;
 
-    final segments = [
-      _Segment(ratio: 0.25, color: const Color(0xFF80B5FE)),
-      _Segment(ratio: 0.15, color: const Color(0xFF2F80ED)),
-      _Segment(ratio: 0.35, color: const Color(0xFF9883F6)),
-      _Segment(ratio: 0.25, color: const Color(0xFFF4B896)),
-    ];
-
     double currentAngle = -pi / 2;
 
     for (final segment in segments) {
+      if (segment.ratio <= 0) continue;
       final sweep = (2 * pi * segment.ratio) - gap;
       paint.color = segment.color;
 
       canvas.drawArc(
         Rect.fromCircle(center: center, radius: radius),
         currentAngle + (gap / 2),
-        sweep,
+        sweep < 0 ? 0 : sweep,
         false,
         paint,
       );
@@ -260,7 +337,7 @@ class DonutChartPainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
+  bool shouldRepaint(covariant DonutChartPainter oldDelegate) => oldDelegate.segments != segments;
 }
 
 class _Segment {

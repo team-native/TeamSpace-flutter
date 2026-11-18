@@ -2,15 +2,19 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:go_router/go_router.dart';
 import 'package:teamspace/core/network/api_exception.dart';
-import 'package:teamspace/data/models/member_models.dart';
-import 'package:teamspace/data/repositories/member_repository.dart';
+import 'package:teamspace/data/models/people_models.dart';
+import 'package:teamspace/data/repositories/home_repository.dart';
+import 'package:teamspace/data/repositories/people_repository.dart';
 import 'package:teamspace/shared/widgets/default_profile_avatar.dart';
 import 'package:teamspace/shared/widgets/state_views.dart';
 
 /// 팀원 상세 화면.
-/// - memberData에 id가 있으면 GET /users/{id} 로 상세를 불러와요.
-/// - memberData가 없으면(마이스페이스 등에서 진입) GET /users/me 로 내 프로필을 보여줘요.
+/// - memberData에 id가 있으면 GET /people/{id} 로 상세를 불러와요.
+/// - memberData가 없으면(마이스페이스 등에서 진입) GET /me 로 내 프로필을 보여줘요.
 /// - 목록에서 넘겨준 name / role / department는 로딩 중에도 바로 보여줘요.
+///
+/// 참고: 서버에는 '기술 스택(skills)' 데이터가 없어서 그 섹션은 화면에서 뺐어요
+/// (예전 목 데이터에만 있던 값이었어요).
 class TeamMemberDetailScreen extends StatefulWidget {
   final Map<String, dynamic>? memberData;
 
@@ -29,20 +33,33 @@ class _TeamMemberDetailScreenState extends State<TeamMemberDetailScreen> {
   static const Color _textDark = Color(0xFF111827);
   static const Color _textSub = Color(0xFF64748B);
 
+  /// 서버 avatarBackground 값 → 화면 색 (edit_profile_screen.dart와 같아요)
+  static const Map<String, Color> _avatarColors = {
+    'GRAY': Color(0xFFEBEBEB),
+    'BLUE': Color(0xFFDBEAFE),
+    'YELLOW': Color(0xFFFEF3C7),
+    'GREEN': Color(0xFFDCFCE7),
+    'PINK': Color(0xFFFCE7F3),
+    'WHITE': Color(0xFFFFFFFF),
+  };
+
   late String _name;
   late String _role;
   late String _department;
   String _email = '';
-  List<ProjectSummary> _projects = [];
-  List<String> _skills = [];
+  String _photo = '';
+  String _avatarBackground = '';
+  List<PersonProject> _projects = [];
 
   bool _isLoading = true;
   String? _errorMessage;
 
-  int? get _memberId {
+  /// /people/{id}는 조직도 멤버 id("member-05")와 계정 숫자 id를 둘 다 받아줘요.
+  String? get _memberId {
     final id = widget.memberData?['id'];
-    if (id is int) return id;
-    return int.tryParse('${id ?? ''}');
+    if (id == null) return null;
+    final s = '$id'.trim();
+    return s.isEmpty ? null : s;
   }
 
   @override
@@ -63,22 +80,39 @@ class _TeamMemberDetailScreenState extends State<TeamMemberDetailScreen> {
 
     try {
       final id = _memberId;
-      final detail = id != null
-          ? await MemberRepository.instance.getMember(id)
-          : await MemberRepository.instance.getMe();
-      if (!mounted) return;
-
-      setState(() {
-        if (detail.name.isNotEmpty) _name = detail.name;
-        if (detail.department.isNotEmpty) _department = detail.department;
-        if (_role.isEmpty && detail.roles.isNotEmpty) {
-          _role = detail.roles.join(' · ');
-        }
-        _email = detail.email;
-        _projects = detail.projects;
-        _skills = detail.skills;
-        _isLoading = false;
-      });
+      if (id != null) {
+        final detail = await PeopleRepository.instance.getPerson(id);
+        if (!mounted) return;
+        setState(() {
+          if (detail.name.isNotEmpty) _name = detail.name;
+          if (detail.department.isNotEmpty) _department = detail.department;
+          if (_role.isEmpty && detail.roles.isNotEmpty) {
+            _role = detail.roles.join(' · ');
+          }
+          _email = detail.email;
+          _photo = detail.photo;
+          _avatarBackground = detail.avatarBackground;
+          _projects = detail.projects;
+          _isLoading = false;
+        });
+      } else {
+        final me = await HomeRepository.instance.getMe();
+        if (!mounted) return;
+        setState(() {
+          if (me.name.isNotEmpty) _name = me.name;
+          if (me.dept.isNotEmpty) _department = me.dept;
+          if (_role.isEmpty && me.roles.isNotEmpty) {
+            _role = me.roles.join(' · ');
+          }
+          _email = me.email;
+          _photo = me.photo;
+          _avatarBackground = me.avatarBackground;
+          _projects = me.projects
+              .map((p) => PersonProject(name: p.name, role: p.role))
+              .toList();
+          _isLoading = false;
+        });
+      }
     } on ApiException catch (e) {
       if (!mounted) return;
       setState(() {
@@ -276,7 +310,12 @@ class _TeamMemberDetailScreenState extends State<TeamMemberDetailScreen> {
               ),
             ],
           ),
-          child: const DefaultProfileAvatar(size: 100),
+          child: DefaultProfileAvatar(
+            size: 100,
+            imageUrl: _photo,
+            backgroundColor: _avatarColors[_avatarBackground] ??
+                const Color(0xFFEAEAEA),
+          ),
         ),
         const SizedBox(height: 16),
         Text(
@@ -473,43 +512,6 @@ class _TeamMemberDetailScreenState extends State<TeamMemberDetailScreen> {
                 ],
               );
             }),
-          ),
-        ),
-      ],
-      if (_skills.isNotEmpty) ...[
-        const SizedBox(height: 24),
-        _buildSectionTitle('기술 스택'),
-        const SizedBox(height: 12),
-        Align(
-          alignment: Alignment.centerLeft,
-          child: Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: _skills.map((skill) {
-              return Container(
-                padding:
-                const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-                decoration: BoxDecoration(
-                  color: Colors.white,
-                  borderRadius: BorderRadius.circular(20),
-                  boxShadow: const [
-                    BoxShadow(
-                      color: Color.fromRGBO(0, 0, 0, 0.02),
-                      blurRadius: 6,
-                      offset: Offset(0, 2),
-                    ),
-                  ],
-                ),
-                child: Text(
-                  '# $skill',
-                  style: const TextStyle(
-                    fontSize: 13,
-                    fontWeight: FontWeight.bold,
-                    color: _textSub,
-                  ),
-                ),
-              );
-            }).toList(),
           ),
         ),
       ],

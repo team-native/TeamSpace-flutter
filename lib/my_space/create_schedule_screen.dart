@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
+import 'package:teamspace/core/network/api_exception.dart';
+import 'package:teamspace/data/repositories/event_repository.dart';
 
 class CreateScheduleScreen extends StatefulWidget {
   const CreateScheduleScreen({super.key});
@@ -9,34 +11,102 @@ class CreateScheduleScreen extends StatefulWidget {
 }
 
 class _CreateScheduleScreenState extends State<CreateScheduleScreen> {
-  final _titleController = TextEditingController(text: '분기 회고');
-  final _locationController = TextEditingController(text: '3층 라운지');
-  final _agendaController = TextEditingController(
-    text: '이번 분기 프로젝트 돌아보기, 다음 분기 목표 정하기',
-  );
+  final _titleController = TextEditingController();
+  final _locationController = TextEditingController();
+  final _agendaController = TextEditingController();
 
   String _selectedCategory = '팀';
-  DateTime _selectedDate = DateTime(2026, 11, 7);
+  late DateTime _selectedDate;
   TimeOfDay _startTime = const TimeOfDay(hour: 14, minute: 0);
-  TimeOfDay _endTime = const TimeOfDay(hour: 15, minute: 30);
+  TimeOfDay _endTime = const TimeOfDay(hour: 15, minute: 0);
+  bool _isAllDay = false;
   bool _requireRsvp = true;
+
+  bool _isSubmitting = false;
+  String? _errorMessage;
 
   static const List<String> _categories = ['팀', '프로젝트', '개인'];
 
   @override
+  void initState() {
+    super.initState();
+    final now = DateTime.now();
+    _selectedDate = DateTime(now.year, now.month, now.day);
+    _titleController.addListener(_onChanged);
+  }
+
+  void _onChanged() {
+    if (_errorMessage != null) setState(() => _errorMessage = null);
+  }
+
+  @override
   void dispose() {
+    _titleController.removeListener(_onChanged);
     _titleController.dispose();
     _locationController.dispose();
     _agendaController.dispose();
     super.dispose();
   }
 
+  String _hhmm(TimeOfDay t) =>
+      '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
+
+  int _minutes(TimeOfDay t) => t.hour * 60 + t.minute;
+
+  /// POST /admin/events
+  Future<void> _submit() async {
+    if (_isSubmitting) return;
+    FocusScope.of(context).unfocus();
+
+    final title = _titleController.text.trim();
+    if (title.isEmpty) {
+      setState(() => _errorMessage = '일정 제목을 입력해 주세요.');
+      return;
+    }
+    if (!_isAllDay && _minutes(_endTime) <= _minutes(_startTime)) {
+      setState(() => _errorMessage = '끝나는 시각은 시작 시각보다 늦어야 해요.');
+      return;
+    }
+
+    setState(() {
+      _isSubmitting = true;
+      _errorMessage = null;
+    });
+
+    try {
+      await EventRepository.instance.createEvent(
+        title: title,
+        scope: _selectedCategory,
+        date: _selectedDate,
+        start: _isAllDay ? '' : _hhmm(_startTime),
+        end: _isAllDay ? '' : _hhmm(_endTime),
+        place: _locationController.text,
+        agenda: _agendaController.text,
+        rsvp: _requireRsvp,
+      );
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('일정을 등록했어요. 구성원에게 새 일정 알림이 가요.'),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+      context.pop(true); // 캘린더가 다시 불러오도록 true를 돌려줘요
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _isSubmitting = false;
+        _errorMessage = e.isForbidden ? '일정은 관리자만 등록할 수 있어요.' : e.message;
+      });
+    }
+  }
+
   Future<void> _pickDate() async {
     final picked = await showDatePicker(
       context: context,
       initialDate: _selectedDate,
-      firstDate: DateTime(2020),
-      lastDate: DateTime(2030),
+      firstDate: DateTime(DateTime.now().year - 1),
+      lastDate: DateTime(DateTime.now().year + 3),
     );
     if (picked != null) {
       setState(() => _selectedDate = picked);
@@ -199,17 +269,40 @@ class _CreateScheduleScreenState extends State<CreateScheduleScreen> {
                             onTap: _pickDate,
                           ),
                           const Divider(height: 24, color: Color(0xFFF1F5F9)),
-                          _buildPickerRow(
-                            label: '시작',
-                            value: _formatTime(_startTime),
-                            onTap: () => _pickTime(isStart: true),
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              const Text(
+                                '하루 종일',
+                                style: TextStyle(
+                                  fontSize: 14,
+                                  color: Color(0xFF64748B),
+                                ),
+                              ),
+                              SizedBox(
+                                height: 28,
+                                child: Switch(
+                                  value: _isAllDay,
+                                  onChanged: (val) => setState(() => _isAllDay = val),
+                                  activeThumbColor: primaryBlue,
+                                ),
+                              ),
+                            ],
                           ),
-                          const Divider(height: 24, color: Color(0xFFF1F5F9)),
-                          _buildPickerRow(
-                            label: '끝',
-                            value: _formatTime(_endTime),
-                            onTap: () => _pickTime(isStart: false),
-                          ),
+                          if (!_isAllDay) ...[
+                            const Divider(height: 24, color: Color(0xFFF1F5F9)),
+                            _buildPickerRow(
+                              label: '시작',
+                              value: _formatTime(_startTime),
+                              onTap: () => _pickTime(isStart: true),
+                            ),
+                            const Divider(height: 24, color: Color(0xFFF1F5F9)),
+                            _buildPickerRow(
+                              label: '끝',
+                              value: _formatTime(_endTime),
+                              onTap: () => _pickTime(isStart: false),
+                            ),
+                          ],
                         ],
                       ),
                     ),
@@ -227,7 +320,7 @@ class _CreateScheduleScreenState extends State<CreateScheduleScreen> {
                     _buildLabel('안건'),
                     _buildInputField(
                       controller: _agendaController,
-                      hintText: '안건 및 상세 내용을 입력하세요',
+                      hintText: '한 줄에 하나씩 적어 주세요\n예) 14:00~14:20 팀 운영 소식 공유',
                       maxLines: 4,
                     ),
                     const SizedBox(height: 20),
@@ -267,7 +360,7 @@ class _CreateScheduleScreenState extends State<CreateScheduleScreen> {
                           Switch(
                             value: _requireRsvp,
                             onChanged: (val) => setState(() => _requireRsvp = val),
-                            activeColor: primaryBlue,
+                            activeThumbColor: primaryBlue,
                           ),
                         ],
                       ),
@@ -290,6 +383,25 @@ class _CreateScheduleScreenState extends State<CreateScheduleScreen> {
                         ),
                       ),
                     ),
+                    if (_errorMessage != null) ...[
+                      const SizedBox(height: 12),
+                      Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFFFF1F2),
+                          borderRadius: BorderRadius.circular(16),
+                        ),
+                        child: Text(
+                          _errorMessage!,
+                          style: const TextStyle(
+                            fontSize: 13,
+                            fontWeight: FontWeight.bold,
+                            color: Color(0xFFEF4444),
+                          ),
+                        ),
+                      ),
+                    ],
                     const SizedBox(height: 20),
 
                     // 일정 등록 버튼
@@ -297,23 +409,25 @@ class _CreateScheduleScreenState extends State<CreateScheduleScreen> {
                       width: double.infinity,
                       height: 52,
                       child: ElevatedButton(
-                        onPressed: () {
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(
-                              content: Text('새 일정이 성공적으로 등록되었습니다.'),
-                              behavior: SnackBarBehavior.floating,
-                            ),
-                          );
-                          context.pop();
-                        },
+                        onPressed: _isSubmitting ? null : _submit,
                         style: ElevatedButton.styleFrom(
                           backgroundColor: primaryBlue,
+                          disabledBackgroundColor: const Color(0xFF93C5FD),
                           elevation: 0,
                           shape: RoundedRectangleBorder(
                             borderRadius: BorderRadius.circular(16),
                           ),
                         ),
-                        child: const Text(
+                        child: _isSubmitting
+                            ? const SizedBox(
+                          width: 22,
+                          height: 22,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2.4,
+                            color: Colors.white,
+                          ),
+                        )
+                            : const Text(
                           '일정 등록',
                           style: TextStyle(
                             fontSize: 16,

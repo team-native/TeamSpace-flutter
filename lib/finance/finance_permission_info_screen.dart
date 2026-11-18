@@ -1,7 +1,45 @@
 import 'package:flutter/material.dart';
+import 'package:intl/intl.dart';
+import 'package:teamspace/core/network/api_exception.dart';
+import 'package:teamspace/data/models/finance_models.dart';
+import 'package:teamspace/data/repositories/finance_repository.dart';
 
-class FinancePermissionInfoScreen extends StatelessWidget {
+class FinancePermissionInfoScreen extends StatefulWidget {
   const FinancePermissionInfoScreen({super.key});
+
+  @override
+  State<FinancePermissionInfoScreen> createState() => _FinancePermissionInfoScreenState();
+}
+
+class _FinancePermissionInfoScreenState extends State<FinancePermissionInfoScreen> {
+  static final NumberFormat _money = NumberFormat.decimalPattern('ko_KR');
+  static final DateFormat _dateFmt = DateFormat('yyyy.MM.dd');
+
+  FinanceSummary? _summary;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    try {
+      final summary = await FinanceRepository.instance.getSummary();
+      if (!mounted) return;
+      setState(() => _summary = summary);
+    } on ApiException {
+      // 공개 요약은 보조 정보라, 못 불러와도 화면은 그대로 보여줘요.
+    }
+  }
+
+  void _toast(String message) {
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(content: Text(message), behavior: SnackBarBehavior.floating),
+      );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -10,6 +48,8 @@ class FinancePermissionInfoScreen extends StatelessWidget {
     const textDark = Color(0xFF111827);
     const textGrey = Color(0xFF8E8E93);
     const cardBorderColor = Color(0x1A000000);
+
+    final summary = _summary;
 
     return Scaffold(
       backgroundColor: bgColor,
@@ -115,9 +155,9 @@ class FinancePermissionInfoScreen extends StatelessWidget {
                 color: const Color(0xFFEFF6FF),
                 borderRadius: BorderRadius.circular(16),
               ),
-              child: Row(
+              child: const Row(
                 crossAxisAlignment: CrossAxisAlignment.start,
-                children: const [
+                children: [
                   Icon(
                     Icons.info_outline_rounded,
                     color: primaryBlue,
@@ -159,17 +199,19 @@ class FinancePermissionInfoScreen extends StatelessWidget {
                     ),
                   ),
                   const SizedBox(height: 4),
-                  const Text(
-                    '2026년 누적 수주 · 표본',
-                    style: TextStyle(
+                  Text(
+                    summary != null && summary.period.isNotEmpty
+                        ? '${summary.period} 수금 합계 · 공개 요약'
+                        : '공개 요약',
+                    style: const TextStyle(
                       fontSize: 12,
                       color: textGrey,
                     ),
                   ),
                   const SizedBox(height: 12),
-                  const Text(
-                    '48,300,000원',
-                    style: TextStyle(
+                  Text(
+                    '${_money.format(summary?.figures.externalReceipts ?? 0)}원',
+                    style: const TextStyle(
                       fontSize: 24,
                       fontWeight: FontWeight.w800,
                       color: textDark,
@@ -179,11 +221,11 @@ class FinancePermissionInfoScreen extends StatelessWidget {
                   const Divider(height: 28, color: Color(0xFFF3F4F6)),
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: const [
-                      Text('최근 수주', style: TextStyle(fontSize: 13, color: textGrey)),
+                    children: [
+                      const Text('이번 달 들어온 돈', style: TextStyle(fontSize: 13, color: textGrey)),
                       Text(
-                        'BRIDGE · 3,600,000원',
-                        style: TextStyle(
+                        '${_money.format(summary?.figures.monthlyRevenue ?? 0)}원',
+                        style: const TextStyle(
                           fontSize: 13,
                           fontWeight: FontWeight.bold,
                           color: textDark,
@@ -194,11 +236,13 @@ class FinancePermissionInfoScreen extends StatelessWidget {
                   const SizedBox(height: 10),
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: const [
-                      Text('확인일', style: TextStyle(fontSize: 13, color: textGrey)),
+                    children: [
+                      const Text('확인일', style: TextStyle(fontSize: 13, color: textGrey)),
                       Text(
-                        '2026.10.15',
-                        style: TextStyle(
+                        summary?.lastSyncedAt != null
+                            ? _dateFmt.format(summary!.lastSyncedAt!.toLocal())
+                            : '확인 전',
+                        style: const TextStyle(
                           fontSize: 13,
                           fontWeight: FontWeight.bold,
                           color: textDark,
@@ -306,7 +350,7 @@ class FinancePermissionInfoScreen extends StatelessWidget {
               width: double.infinity,
               height: 52,
               child: ElevatedButton(
-                onPressed: () {},
+                onPressed: () => _toast('준비 중이에요.'),
                 style: ElevatedButton.styleFrom(
                   backgroundColor: const Color(0xFFF3F4F6),
                   elevation: 0,
@@ -329,7 +373,7 @@ class FinancePermissionInfoScreen extends StatelessWidget {
               width: double.infinity,
               height: 52,
               child: ElevatedButton(
-                onPressed: () {},
+                onPressed: () => _toast('준비 중이에요.'),
                 style: ElevatedButton.styleFrom(
                   backgroundColor: primaryBlue,
                   elevation: 0,

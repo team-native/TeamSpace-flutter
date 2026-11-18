@@ -6,6 +6,14 @@ import '../shared/widgets/custom_bottom_nav_bar.dart';
 class FinanceNoPermissionScreen extends StatelessWidget {
   const FinanceNoPermissionScreen({super.key});
 
+  void _toast(BuildContext context, String message) {
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(content: Text(message), behavior: SnackBarBehavior.floating),
+      );
+  }
+
   @override
   Widget build(BuildContext context) {
     const bgColor = Color(0xFFF6F7F9);
@@ -188,7 +196,7 @@ class FinanceNoPermissionScreen extends StatelessWidget {
               width: double.infinity,
               height: 52,
               child: OutlinedButton(
-                onPressed: () {},
+                onPressed: () => context.push(AppRoutes.permissionInfo),
                 style: OutlinedButton.styleFrom(
                   backgroundColor: Colors.white,
                   side: const BorderSide(color: Color(0xFFD1E5FF), width: 1),
