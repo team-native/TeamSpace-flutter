@@ -1,6 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import '../../app/router.dart';
+import 'package:teamspace/app/departments.dart';
+import 'package:teamspace/core/network/api_exception.dart';
+import 'package:teamspace/data/repositories/auth_repository.dart';
 
 class AccountRequestScreen extends StatefulWidget {
   const AccountRequestScreen({super.key});
@@ -21,14 +24,8 @@ class _AccountRequestScreenState extends State<AccountRequestScreen> {
   bool _obscurePassword = true;
   bool _isLoading = false;
 
-  final List<String> _departments = [
-    'Leader',
-    'OL',
-    'PMO',
-    'FA',
-    'Native',
-    'NativeLab',
-  ];
+  // 서버가 받는 공식 부서 11개 (app/departments.dart)
+  final List<String> _departments = Departments.official;
 
   @override
   void dispose() {
@@ -41,21 +38,33 @@ class _AccountRequestScreenState extends State<AccountRequestScreen> {
     super.dispose();
   }
 
-  void _handleSubmit() async {
-    if (_nameController.text.trim().isEmpty ||
-        _emailController.text.trim().isEmpty ||
-        _selectedDepartment == null) {
+  Future<void> _handleSubmit() async {
+    final name = _nameController.text.trim();
+    final email = _emailController.text.trim();
+
+    if (name.isEmpty || email.isEmpty || _selectedDepartment == null) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('모든 필수 항목을 입력 및 선택해 주세요.')),
       );
       return;
     }
 
+    FocusScope.of(context).unfocus();
     setState(() => _isLoading = true);
-    await Future.delayed(const Duration(milliseconds: 600));
 
-    if (mounted) {
-      setState(() => _isLoading = false);
+    try {
+      // POST /auth/signup-requests
+      await AuthRepository.instance.requestSignup(
+        email: email,
+        name: name,
+        dept: _selectedDepartment!,
+        password: _passwordController.text,
+        major: _majorController.text.trim(),
+        cohort: _generationController.text.trim(),
+        message: _commentController.text.trim(),
+      );
+
+      if (!mounted) return;
 
       final now = DateTime.now();
       final formattedDate =
@@ -65,8 +74,8 @@ class _AccountRequestScreenState extends State<AccountRequestScreen> {
       context.go(
         AppRoutes.requestSuccess,
         extra: {
-          'name': _nameController.text.trim(),
-          'email': _emailController.text.trim(),
+          'name': name,
+          'email': email,
           'department': _selectedDepartment!,
           'major': _majorController.text.trim(),
           'generation': _generationController.text.trim(),
@@ -74,6 +83,14 @@ class _AccountRequestScreenState extends State<AccountRequestScreen> {
           'requestedAt': formattedDate,
         },
       );
+    } on ApiException catch (e) {
+      // 409: 이미 등록된 이메일 / 이미 검토 중인 요청, 422: 입력값 오류 등
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(e.message)),
+      );
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
     }
   }
 
@@ -97,65 +114,71 @@ class _AccountRequestScreenState extends State<AccountRequestScreen> {
               ],
             ),
             clipBehavior: Clip.antiAlias,
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: _departments.asMap().entries.map((entry) {
-                final index = entry.key;
-                final dept = entry.value;
-                final isSelected = _selectedDepartment == dept;
+            // 11개라 화면이 작으면 넘칠 수 있어서 높이를 제한하고 스크롤해요
+            constraints: BoxConstraints(
+              maxHeight: MediaQuery.of(context).size.height * 0.7,
+            ),
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: _departments.asMap().entries.map((entry) {
+                  final index = entry.key;
+                  final dept = entry.value;
+                  final isSelected = _selectedDepartment == dept;
 
-                return Column(
-                  children: [
-                    InkWell(
-                      onTap: () {
-                        setState(() {
-                          _selectedDepartment = dept;
-                        });
-                        Navigator.pop(context);
-                      },
-                      child: Container(
-                        width: double.infinity,
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 20,
-                          vertical: 16,
-                        ),
-                        color: isSelected ? const Color(0xFFF0F5FF) : Colors.white,
-                        child: Row(
-                          children: [
-                            SizedBox(
-                              width: 24,
-                              child: isSelected
-                                  ? const Icon(
-                                Icons.check_rounded,
-                                color: Color(0xFF2F80ED),
-                                size: 18,
-                              )
-                                  : null,
-                            ),
-                            const SizedBox(width: 8),
-                            Text(
-                              dept,
-                              style: TextStyle(
-                                fontSize: 15,
-                                fontWeight: isSelected ? FontWeight.bold : FontWeight.w500,
-                                color: isSelected
-                                    ? const Color(0xFF2F80ED)
-                                    : const Color(0xFF333333),
+                  return Column(
+                    children: [
+                      InkWell(
+                        onTap: () {
+                          setState(() {
+                            _selectedDepartment = dept;
+                          });
+                          Navigator.pop(context);
+                        },
+                        child: Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 20,
+                            vertical: 16,
+                          ),
+                          color: isSelected ? const Color(0xFFF0F5FF) : Colors.white,
+                          child: Row(
+                            children: [
+                              SizedBox(
+                                width: 24,
+                                child: isSelected
+                                    ? const Icon(
+                                  Icons.check_rounded,
+                                  color: Color(0xFF2F80ED),
+                                  size: 18,
+                                )
+                                    : null,
                               ),
-                            ),
-                          ],
+                              const SizedBox(width: 8),
+                              Text(
+                                dept,
+                                style: TextStyle(
+                                  fontSize: 15,
+                                  fontWeight: isSelected ? FontWeight.bold : FontWeight.w500,
+                                  color: isSelected
+                                      ? const Color(0xFF2F80ED)
+                                      : const Color(0xFF333333),
+                                ),
+                              ),
+                            ],
+                          ),
                         ),
                       ),
-                    ),
-                    if (index < _departments.length - 1)
-                      const Divider(
-                        height: 1,
-                        thickness: 1,
-                        color: Color(0xFFF5F6F8),
-                      ),
-                  ],
-                );
-              }).toList(),
+                      if (index < _departments.length - 1)
+                        const Divider(
+                          height: 1,
+                          thickness: 1,
+                          color: Color(0xFFF5F6F8),
+                        ),
+                    ],
+                  );
+                }).toList(),
+              ),
             ),
           ),
         );
